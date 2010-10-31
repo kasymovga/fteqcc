@@ -12,6 +12,9 @@ extern char *compilingfile;
 
 int conditional;
 
+extern int dotranslate;
+extern int dotranslate_count;
+
 //standard qcc keywords
 #define keyword_do		1
 #define keyword_return	1
@@ -3447,6 +3450,15 @@ QCC_def_t *QCC_PR_ParseFunctionCall (QCC_def_t *func)	//warning, the func could 
 
 			return e;
 		}
+		else if (!strcmp(func->name, "_") && !QCC_PR_CheckToken(")"))
+		{
+			// return string as is, but set the dotranslate flag
+			++dotranslate;
+			e = QCC_PR_Expression(TOP_PRIORITY, EXPR_DISALLOW_COMMA);
+			--dotranslate;
+			QCC_PR_Expect(")");
+			return e;
+		}
 	}	//so it's not an intrinsic.
 
 	if (opt_precache_file)	//should we strip out all precache_file calls?
@@ -3775,13 +3787,16 @@ QCC_def_t *QCC_MakeFloatDef(float value)
 	return cn;
 }
 
-hashtable_t stringconstdefstable;
+extern hashtable_t stringconstdefstable;
+extern hashtable_t stringconstdefstable_dotranslate;
 QCC_def_t *QCC_MakeStringDef(char *value)
 {
 	QCC_def_t	*cn;
 	int string;
+	hashtable_t *tbl = dotranslate ? &stringconstdefstable_dotranslate : &stringconstdefstable;
+	char buf[64];
 
-	cn = pHash_Get(&stringconstdefstable, value);
+	cn = pHash_Get(tbl, value);
 	if (cn)
 		return cn;
 
@@ -3792,7 +3807,13 @@ QCC_def_t *QCC_MakeStringDef(char *value)
 	pr.def_tail = cn;
 
 	cn->type = type_string;
-	cn->name = "IMMEDIATE";
+	if(dotranslate > 0)
+	{
+		sprintf(buf, "dotranslate_%d", ++dotranslate_count);
+		cn->name = strdup(buf);
+	}
+	else
+		cn->name = "IMMEDIATE";
 	cn->constant = true;
 	cn->initialized = 1;
 	cn->scope = NULL;		// always share immediates
@@ -3803,7 +3824,7 @@ QCC_def_t *QCC_MakeStringDef(char *value)
 	
 	string = QCC_CopyString (value);
 
-	pHash_Add(&stringconstdefstable, strings+string, cn, qccHunkAlloc(sizeof(bucket_t)));
+	pHash_Add(tbl, strings+string, cn, qccHunkAlloc(sizeof(bucket_t)));
 	
 	G_INT(cn->ofs) = string;	
 		
@@ -4059,6 +4080,25 @@ QCC_def_t	*QCC_PR_ParseValue (QCC_type_t *assumeclass, pbool allowarrayassign)
 	char		*name;
 	QCC_dstatement_t *st;
 	int i;
+	static QCC_def_t intrinsic = {
+		NULL,	// QCC_type_t		*type;
+		NULL,	// char		*name;
+		NULL,	// struct QCC_def_s	*next;
+		NULL,	// struct QCC_def_s	*nextlocal;	//provides a chain of local variables for the opt_locals_marshalling optimisation.
+		0,	// gofs_t		ofs;
+		NULL,	// struct QCC_def_s	*scope;		// function the var was defined in, or NULL
+		1,	// int			initialized;	// 1 when a declaration included "= immediate"
+		1,	// int			constant;		// 1 says we can use the value over and over again
+		1,	// int references;
+		0,	// int timescalled;	//part of the opt_stripfunctions optimisation.
+		0,	// int s_file;
+		0,	// int s_line;
+		0,	// int arraysize;
+		0,	// pbool shared;
+		0,	// pbool saved;
+		0,	// pbool isstatic;
+		NULL	// temp_t *temp;
+	};
 
 	char membername[2048];
 	
@@ -4111,8 +4151,13 @@ QCC_def_t	*QCC_PR_ParseValue (QCC_type_t *assumeclass, pbool allowarrayassign)
 	{
 		if (	(!strcmp(name, "random" ))	||
 				(!strcmp(name, "randomv"))	||
-				(!strcmp(name, "entnum"))	)	//intrinsics, any old function with no args will do.
-			od = d = QCC_PR_GetDef (type_function, name, NULL, true, 1, false);
+				(!strcmp(name, "entnum"))	||
+				(!strcmp(name, "_"))	)	//intrinsics, any old function with no args will do.
+		{
+			intrinsic.name = name;
+			intrinsic.type = type_function; // can't put that in the static var
+			od = d = &intrinsic;
+		}
 		else if (keyword_class && !strcmp(name, "this"))
 		{
 			if (!pr_classtype)
