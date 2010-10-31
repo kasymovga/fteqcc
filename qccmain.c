@@ -237,6 +237,7 @@ compiler_flag_t compiler_flag[] = {
 	{&flag_msvcstyle,		FLAG_MIDCOMPILE,"msvcstyle",	"MSVC-style errors",	"Generates warning and error messages in a format that msvc understands, to facilitate ide integration."},
 	{&flag_fasttrackarrays,	FLAG_MIDCOMPILE|FLAG_ASDEFAULT,"fastarrays","fast arrays where possible",	"Generates extra instructions inside array handling functions to detect engine and use extension opcodes only in supporting engines.\nAdds a global which is set by the engine if the engine supports the extra opcodes. Note that this applies to all arrays or none."},
 	{&flag_assume_integer,	FLAG_MIDCOMPILE,"assumeint",	"Assume Integers",		"Numerical constants are assumed to be integers, instead of floats."},
+	{&pr_subscopedlocals,	FLAG_MIDCOMPILE,"subscope",	"Subscoped locals",		"Allow locals to only be valid in the block they are defined in (like in C)."},
 	{NULL}
 };
 
@@ -2949,6 +2950,7 @@ memset(pr_immediate_string, 0, sizeof(pr_immediate_string));
 		printf ("-Wall to give a stupid number of warnings\n");
 		printf ("-Ttarget to set a output format\n");
 		printf ("-Fautoproto to enable automatic prototyping\n");
+		printf ("-Fsubscope to enable subscopes\n");
 
 		qcc_compileactive = false;
 		return;
