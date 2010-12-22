@@ -343,7 +343,6 @@ typedef struct QCC_def_s
 	pbool shared;
 	pbool saved;
 	pbool isstatic;
-	pbool subscoped_away;
 
 	temp_t *temp;
 } QCC_def_t;

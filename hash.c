@@ -187,6 +187,8 @@ void Hash_Remove(hashtable_t *table, char *name)
 	bucket_t *buck;	
 
 	buck = table->bucket[bucknum];
+	if(!buck)
+		return;
 
 	if (!STRCMP(name, buck->key.string))
 	{
@@ -214,6 +216,8 @@ void Hash_RemoveData(hashtable_t *table, char *name, void *data)
 	bucket_t *buck;	
 
 	buck = table->bucket[bucknum];
+	if(!buck)
+		return;
 
 	if (buck->data == data)
 		if (!STRCMP(name, buck->key.string))
@@ -244,6 +248,8 @@ void Hash_RemoveKey(hashtable_t *table, int key)
 	bucket_t *buck;	
 
 	buck = table->bucket[bucknum];
+	if(!buck)
+		return;
 
 	if (buck->key.value == key)
 	{
