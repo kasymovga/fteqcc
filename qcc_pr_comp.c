@@ -9135,7 +9135,7 @@ void QCC_PR_ParseDefs (char *classname)
 				}
 			}
 			else
-				if (pr_token_type == tt_name)
+				if (pr_token_type == tt_name && strcmp(pr_token, "_"))
 			{
 				unsigned int i;
 
@@ -9144,7 +9144,7 @@ void QCC_PR_ParseDefs (char *classname)
 
 				d = QCC_PR_GetDef(NULL, pr_token, pr_scope, false, 0, false);
 				if (!d)
-					QCC_PR_ParseError(ERR_NOTDEFINED, "%s was not defined\n", name);
+					QCC_PR_ParseError(ERR_NOTDEFINED, "%s was not defined\n", pr_token);
 				if (typecmp(def->type, d->type))
 					QCC_PR_ParseError (ERR_BADIMMEDIATETYPE, "wrong immediate type for %s", name);
 
@@ -9461,6 +9461,16 @@ void QCC_PR_ParseDefs (char *classname)
 			}
 			else if (type->type == ev_string)
 			{
+				int dotranslate = 0;
+				char buf[64];
+				if (!strcmp(pr_token, "_"))
+				{
+					dotranslate = 1;
+					QCC_PR_Lex();
+				}
+				if(dotranslate)
+					QCC_PR_Expect("(");
+
 				if (arraysize>=1 && QCC_PR_CheckToken("{"))
 				{
 					int i;
@@ -9476,7 +9486,13 @@ void QCC_PR_ParseDefs (char *classname)
 							pr.def_tail = d;
 
 							d->type = type_string;
-							d->name = "IMMEDIATE";
+							if(dotranslate)
+							{
+								sprintf(buf, "dotranslate_%d", ++dotranslate_count);
+								d->name = strdup(buf);
+							}
+							else
+								d->name = "IMMEDIATE";
 							if (isvar)
 								d->constant = false;
 							else
@@ -9496,8 +9512,6 @@ void QCC_PR_ParseDefs (char *classname)
 							break;
 					}
 					QCC_PR_Expect("}");
-
-					continue;
 				}
 				else if (arraysize<=1)
 				{
@@ -9509,15 +9523,23 @@ void QCC_PR_ParseDefs (char *classname)
 					(((int *)qcc_pr_globals)[def->ofs]) = QCC_CopyString(pr_immediate_string);
 					QCC_PR_Lex ();
 
+					if(dotranslate)
+					{
+						sprintf(buf, "dotranslate_%d", ++dotranslate_count);
+						def->name = strdup(buf);
+					}
+
 					if (pr_immediate_type->type == ev_float)
 						G_INT(def->ofs) = (int)pr_immediate._float;
 					else if (pr_immediate_type->type != ev_string)
 						QCC_PR_ParseError (ERR_BADIMMEDIATETYPE, "wrong immediate type for %s", name);
-
-					continue;
 				}
 				else
 					QCC_PR_ParseError(ERR_ARRAYNEEDSBRACES, "Array initialisation requires curly brasces");
+
+				if(dotranslate)
+					QCC_PR_Expect(")");
+				continue;
 			}
 			else if (type->type == ev_float)
 			{
