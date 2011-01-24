@@ -9483,6 +9483,8 @@ void QCC_PR_ParseDefs (char *classname)
 					int i;
 					for (i = 0; i < arraysize; i++)
 					{
+						int dotranslate2;
+
 						//the executor defines strings as true c strings, but reads in index from string table.
 						//structures can hide these strings.
 						if (i != 0)	//not for the first entry - already a string def for that
@@ -9492,14 +9494,8 @@ void QCC_PR_ParseDefs (char *classname)
 							pr.def_tail->next = d;
 							pr.def_tail = d;
 
+							d->name = "IMMEDIATE";
 							d->type = type_string;
-							if(dotranslate)
-							{
-								sprintf(buf, "dotranslate_%d", ++dotranslate_count);
-								d->name = strdup(buf);
-							}
-							else
-								d->name = "IMMEDIATE";
 							if (isvar)
 								d->constant = false;
 							else
@@ -9512,8 +9508,25 @@ void QCC_PR_ParseDefs (char *classname)
 								QCC_Error(ERR_TOOMANYGLOBALS, "MAX_REGS is too small");
 						}
 
+						if (!strcmp(pr_token, "_"))
+						{
+							dotranslate2 = 1;
+							QCC_PR_Lex();
+						}
+						if(dotranslate2)
+							QCC_PR_Expect("(");
+
+						if(dotranslate || dotranslate2)
+						{
+							sprintf(buf, "dotranslate_%d", ++dotranslate_count);
+							d->name = strdup(buf);
+						}
+
 						(((int *)qcc_pr_globals)[def->ofs+i]) = QCC_CopyString(pr_immediate_string);
 						QCC_PR_Lex ();
+
+						if(dotranslate2)
+							QCC_PR_Expect(")");
 
 						if (!QCC_PR_CheckToken(","))
 							break;
