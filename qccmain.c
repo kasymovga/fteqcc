@@ -2,13 +2,16 @@
 
 #define PROGSUSED
 #include "qcc.h"
-int mkdir(const char *path);
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
+
+#include "errno.h"
 
 char QCC_copyright[1024];
 int QCC_packid;
 char QCC_Packname[5][128];
-
-extern QCC_def_t *functemps;		//floats/strings/funcs/ents...
 
 extern int optres_test1;
 extern int optres_test2;
@@ -235,6 +238,7 @@ compiler_flag_t compiler_flag[] = {
 	{&flag_hashonly,		FLAG_MIDCOMPILE,"hashonly",		"Hash-only constants",	"Allows use of only #constant for precompiler constants, allows certain preqcc using mods to compile"},
 	{&opt_logicops,			FLAG_MIDCOMPILE,"lo",			"Logic ops",			"This changes the behaviour of your code. It generates additional if operations to early-out in if statements. With this flag, the line if (0 && somefunction()) will never call the function. It can thus be considered an optimisation. However, due to the change of behaviour, it is not considered so by fteqcc. Note that due to inprecisions with floats, this flag can cause runaway loop errors within the player walk and run functions (without iffloat also enabled). This code is advised:\nplayer_stand1:\n    if (self.velocity_x || self.velocity_y)\nplayer_run\n    if (!(self.velocity_x || self.velocity_y))"},
 	{&flag_msvcstyle,		FLAG_MIDCOMPILE,"msvcstyle",	"MSVC-style errors",	"Generates warning and error messages in a format that msvc understands, to facilitate ide integration."},
+	{&flag_filetimes,		0,				"filetimes",	"Check Filetimes",		"Recompiles the progs only if the file times are modified."},
 	{&flag_fasttrackarrays,	FLAG_MIDCOMPILE|FLAG_ASDEFAULT,"fastarrays","fast arrays where possible",	"Generates extra instructions inside array handling functions to detect engine and use extension opcodes only in supporting engines.\nAdds a global which is set by the engine if the engine supports the extra opcodes. Note that this applies to all arrays or none."},
 	{&flag_assume_integer,	FLAG_MIDCOMPILE,"assumeint",	"Assume Integers",		"Numerical constants are assumed to be integers, instead of floats."},
 	{&pr_subscopedlocals,	FLAG_MIDCOMPILE,"subscope",	"Subscoped locals",		"Allow locals to only be valid in the block they are defined in (like in C)."},
@@ -258,6 +262,7 @@ struct {
 	{QCF_FTE,		"fte"},
 	{QCF_DARKPLACES,"darkplaces"},
 	{QCF_DARKPLACES,"dp"},
+	{QCF_QTEST,		"qtest"},
 	{0,				NULL}
 };
 
@@ -278,6 +283,7 @@ void QCC_BspModels (void)
 	char	*m;
 	char	cmd[1024];
 	char	name[256];
+	size_t result;
 
 	p = QCC_CheckParm ("-bspmodels");
 	if (!p)
@@ -285,7 +291,7 @@ void QCC_BspModels (void)
 	if (p == myargc-1)
 		QCC_Error (ERR_BADPARMS, "-bspmodels must preceed a game directory");
 	gamedir = myargv[p+1];
-	
+
 	for (i=0 ; i<nummodels ; i++)
 	{
 		m = precache_models[i];
@@ -294,7 +300,10 @@ void QCC_BspModels (void)
 		strcpy (name, m);
 		name[strlen(m)-4] = 0;
 		sprintf (cmd, "qbsp %s/%s ; light -extra %s/%s", gamedir, name, gamedir, name);
-		system (cmd);
+		result = system (cmd); // do something with the result
+
+		if (result != 0)
+			QCC_Error(ERR_INTERNAL, "QCC_BspModels() system returned non zero (failure) with: qbsp %s/%s ; light -extra %s/%s (%i)\n", gamedir, name, gamedir, name, errno);
 	}
 }
 
@@ -331,7 +340,7 @@ int	QCC_CopyDupBackString (char *str)
 	for (s = strings+strofs-1; s>strings ; s--)
 		if (!strcmp(s, str))
 			return s-strings;
-	
+
 	old = strofs;
 	strcpy (strings+strofs, str);
 	strofs += strlen(str)+1;
@@ -341,7 +350,7 @@ int	QCC_CopyDupBackString (char *str)
 void QCC_PrintStrings (void)
 {
 	int		i, l, j;
-	
+
 	for (i=0 ; i<strofs ; i += l)
 	{
 		l = strlen(strings+i) + 1;
@@ -365,7 +374,7 @@ void QCC_PrintStrings (void)
 {
 	int		i,j;
 	QCC_dfunction_t	*d;
-	
+
 	for (i=0 ; i<numfunctions ; i++)
 	{
 		d = &functions[i];
@@ -380,7 +389,7 @@ void QCC_PrintFields (void)
 {
 	int		i;
 	QCC_ddef_t	*d;
-	
+
 	for (i=0 ; i<numfielddefs ; i++)
 	{
 		d = &fields[i];
@@ -392,7 +401,7 @@ void QCC_PrintGlobals (void)
 {
 	int		i;
 	QCC_ddef_t	*d;
-	
+
 	for (i=0 ; i<numglobaldefs ; i++)
 	{
 		d = &qcc_globals[i];
@@ -455,7 +464,7 @@ int WriteSourceFiles(int h, dprograms_t *progs, pbool sourceaswell)
 		num++;
 	}
 
-	ofs = SafeSeek(h, 0, SEEK_CUR);	
+	ofs = SafeSeek(h, 0, SEEK_CUR);
 	SafeWrite(h, &num, sizeof(int));
 	SafeWrite(h, idf, sizeof(includeddatafile_t)*num);
 
@@ -471,7 +480,7 @@ void QCC_InitData (void)
 	int		i;
 
 	qcc_sourcefile = NULL;
-	
+
 	numstatements = 1;
 	strofs = 1;
 	numfunctions = 1;
@@ -479,7 +488,7 @@ void QCC_InitData (void)
 	numfielddefs = 1;
 
 	memset(&ret_temp, 0, sizeof(ret_temp));
-	
+
 	def_ret.ofs = OFS_RETURN;
 	def_ret.name = "return";
 	def_ret.temp = &ret_temp;
@@ -567,7 +576,8 @@ pbool QCC_WriteData (int crc)
 	int			i, len;
 	pbool debugtarget = false;
 	pbool types = false;
-	int outputsize = 16;
+	int outputsttype = PST_DEFAULT;
+	pbool warnedunref = false;
 
 	if (numstatements==1 && numfunctions==1 && numglobaldefs==1 && numfielddefs==1)
 	{
@@ -595,7 +605,7 @@ pbool QCC_WriteData (int crc)
 		if (numpr_globals > 65530 )
 		{
 			printf("Forcing target to FTE32 due to numpr_globals\n");
-			outputsize = 32;
+			outputsttype = PST_FTE32;
 		}
 		else if (qcc_targetformat == QCF_HEXEN2)
 		{
@@ -621,7 +631,7 @@ pbool QCC_WriteData (int crc)
 		if (numpr_globals > 65530)
 		{
 			printf("Using 32 bit target due to numpr_globals\n");
-			outputsize = 32;
+			outputsttype = PST_FTE32;
 		}
 
 		if (qcc_targetformat == QCF_DARKPLACES)
@@ -639,6 +649,12 @@ pbool QCC_WriteData (int crc)
 		if (compressoutput)		progs.blockscompressed |=128;	//types
 		//include a type block?
 		types = debugtarget;//!!QCC_PR_CheckCompConstDefined("TYPES");	//useful for debugging and saving (maybe, anyway...).
+		if (sizeof(char *) != sizeof(string_t))
+		{
+			//qcc_typeinfo_t has a char* inside it, which changes size
+			printf("AMD64 builds cannot write typeinfo structures\n");
+			types = false;
+		}
 
 		if (verbose)
 		{
@@ -655,7 +671,14 @@ pbool QCC_WriteData (int crc)
 			printf("Warning: Saving is not supported. Ensure all engine read fields and globals are defined early on.\n");
 
 		printf("A KK compatible executor will be required (FTE/KK)\n");
+		outputsttype = PST_KKQWSV;
 		break;
+	case QCF_QTEST:
+		printf("Compiled QTest progs will most likely not work at all. YOU'VE BEEN WARNED!\n");
+		outputsttype = PST_QTEST;
+		break;
+	default:
+		Sys_Error("invalid progs type chosen!");
 	}
 
 	//part of how compilation works. This def is always present, and never used.
@@ -690,8 +713,8 @@ pbool QCC_WriteData (int crc)
 						h=0;
 
 				def->references = h;
-				
-					
+
+
 				if (!h)
 					h = 1;
 				if (comp_x)
@@ -708,6 +731,11 @@ pbool QCC_WriteData (int crc)
 				QCC_PR_Warning(WARN_NOTREFERENCEDCONST, strings + def->s_file, def->s_line, "%s  no references", def->name);
 			else
 				QCC_PR_Warning(WARN_NOTREFERENCED, strings + def->s_file, def->s_line, "%s  no references", def->name);
+			if (!warnedunref)
+			{
+				QCC_PR_Note(WARN_NOTREFERENCED, NULL, 0, "You can use the noref prefix or pragma to silence this message.");
+				warnedunref = true;
+			}
 
 			if (opt_unreferenced && def->type->type != ev_field)
 			{
@@ -740,7 +768,7 @@ pbool QCC_WriteData (int crc)
 //			numfunctions++;
 
 		}
-		else if (def->type->type == ev_field)// && !def->constant)
+		else if (def->type->type == ev_field && def->constant)
 		{
 			dd = &fields[numfielddefs];
 			numfielddefs++;
@@ -863,7 +891,7 @@ strofs = (strofs+3)&~3;
 		printf ("%6i numfielddefs (%i unique) (of %i)\n", numfielddefs, pr.size_fields, MAX_FIELDS);
 		printf ("%6i numpr_globals (of %i)\n", numpr_globals, MAX_REGS);
 	}
-	
+
 	if (!*destfile)
 		strcpy(destfile, "progs.dat");
 	if (verbose)
@@ -882,7 +910,7 @@ strofs = (strofs+3)&~3;
 	progs.numstrings = strofs;
 
 	if (progs.blockscompressed&16)
-	{		
+	{
 		SafeWrite (h, &len, sizeof(int));	//save for later
 		len = QC_encode(progfuncs, strofs*sizeof(char), 2, (char *)strings, h);	//write
 		i = SafeSeek (h, 0, SEEK_CUR);
@@ -910,9 +938,10 @@ strofs = (strofs+3)&~3;
 
 	for (i=0 ; i<numstatements ; i++)
 
-	switch(qcc_targetformat == QCF_KK7?32:outputsize)	//KK7 sucks.
+	switch(outputsttype)
 	{
-	case 32:
+	case PST_KKQWSV:
+	case PST_FTE32:
 		for (i=0 ; i<numstatements ; i++)
 		{
 			statements[i].op = PRLittleLong/*PRLittleShort*/(statements[i].op);
@@ -920,9 +949,9 @@ strofs = (strofs+3)&~3;
 			statements[i].b = PRLittleLong/*PRLittleShort*/(statements[i].b);
 			statements[i].c = PRLittleLong/*PRLittleShort*/(statements[i].c);
 		}
-		
+
 		if (progs.blockscompressed&1)
-		{		
+		{
 			SafeWrite (h, &len, sizeof(int));	//save for later
 			len = QC_encode(progfuncs, numstatements*sizeof(QCC_dstatement32_t), 2, (char *)statements, h);	//write
 			i = SafeSeek (h, 0, SEEK_CUR);
@@ -934,7 +963,32 @@ strofs = (strofs+3)&~3;
 		else
 			SafeWrite (h, statements, numstatements*sizeof(QCC_dstatement32_t));
 		break;
-	case 16:
+	case PST_QTEST:
+#define qtst ((qtest_statement_t*) statements)
+		for (i=0 ; i<numstatements ; i++) // scale down from 16-byte internal to 12-byte qtest
+		{
+			QCC_dstatement_t stmt = statements[i];
+			qtst[i].line = 0; // no line support
+			qtst[i].op = PRLittleShort((unsigned short)stmt.op);
+			if (stmt.a < 0)
+				qtst[i].a = PRLittleShort((short)stmt.a);
+			else
+				qtst[i].a = (unsigned short)PRLittleShort((unsigned short)stmt.a);
+			if (stmt.b < 0)
+				qtst[i].b = PRLittleShort((short)stmt.b);
+			else
+				qtst[i].b = (unsigned short)PRLittleShort((unsigned short)stmt.b);
+			if (stmt.c < 0)
+				qtst[i].c = PRLittleShort((short)stmt.c);
+			else
+				qtst[i].c = (unsigned short)PRLittleShort((unsigned short)stmt.c);
+		}
+
+		// no compression
+		SafeWrite (h, qtst, numstatements*sizeof(qtest_statement_t));
+#undef qtst
+		break;
+	case PST_DEFAULT:
 #define statements16 ((QCC_dstatement16_t*) statements)
 		for (i=0 ; i<numstatements ; i++)	//resize as we go - scaling down
 		{
@@ -952,9 +1006,9 @@ strofs = (strofs+3)&~3;
 			else
 				statements16[i].c = (unsigned short)PRLittleShort((unsigned short)statements[i].c);
 		}
-		
+
 		if (progs.blockscompressed&1)
-		{		
+		{
 			SafeWrite (h, &len, sizeof(int));	//save for later
 			len = QC_encode(progfuncs, numstatements*sizeof(QCC_dstatement16_t), 2, (char *)statements16, h);	//write
 			i = SafeSeek (h, 0, SEEK_CUR);
@@ -967,37 +1021,88 @@ strofs = (strofs+3)&~3;
 			SafeWrite (h, statements16, numstatements*sizeof(QCC_dstatement16_t));
 		break;
 	default:
-		Sys_Error("intsize error");
+		Sys_Error("structtype error");
 	}
 
 	progs.ofs_functions = SafeSeek (h, 0, SEEK_CUR);
 	progs.numfunctions = numfunctions;
-	for (i=0 ; i<numfunctions ; i++)
+
+	switch (outputsttype)
 	{
-		functions[i].first_statement = PRLittleLong (functions[i].first_statement);
-		functions[i].parm_start = PRLittleLong (functions[i].parm_start);
-		functions[i].s_name = PRLittleLong (functions[i].s_name);
-		functions[i].s_file = PRLittleLong (functions[i].s_file);
-		functions[i].numparms = PRLittleLong ((functions[i].numparms>MAX_PARMS)?MAX_PARMS:functions[i].numparms);
-		functions[i].locals = PRLittleLong (functions[i].locals);
+	case PST_QTEST:
+		{
+			// this sucks but the structures are just too different
+			qtest_function_t *qtestfuncs = (qtest_function_t *)qccHunkAlloc(sizeof(qtest_function_t)*numfunctions);
+
+			for (i=0 ; i<numfunctions ; i++)
+			{
+				int j;
+
+				qtestfuncs[i].unused1 = 0;
+				qtestfuncs[i].profile = 0;
+				qtestfuncs[i].first_statement = PRLittleLong (functions[i].first_statement);
+				qtestfuncs[i].parm_start = PRLittleLong (functions[i].parm_start);
+				qtestfuncs[i].s_name = PRLittleLong (functions[i].s_name);
+				qtestfuncs[i].s_file = PRLittleLong (functions[i].s_file);
+				qtestfuncs[i].numparms = PRLittleLong ((functions[i].numparms>MAX_PARMS)?MAX_PARMS:functions[i].numparms);
+				qtestfuncs[i].locals = PRLittleLong (functions[i].locals);
+				for (j = 0; j < MAX_PARMS; j++)
+					qtestfuncs[i].parm_size[j] = PRLittleLong((int)functions[i].parm_size[j]);
+			}
+
+			SafeWrite (h, qtestfuncs, numfunctions*sizeof(qtest_function_t));
+		}
+		break;
+	case PST_DEFAULT:
+	case PST_KKQWSV:
+	case PST_FTE32:
+		for (i=0 ; i<numfunctions ; i++)
+		{
+			functions[i].first_statement = PRLittleLong (functions[i].first_statement);
+			functions[i].parm_start = PRLittleLong (functions[i].parm_start);
+			functions[i].s_name = PRLittleLong (functions[i].s_name);
+			functions[i].s_file = PRLittleLong (functions[i].s_file);
+			functions[i].numparms = PRLittleLong ((functions[i].numparms>MAX_PARMS)?MAX_PARMS:functions[i].numparms);
+			functions[i].locals = PRLittleLong (functions[i].locals);
+		}
+
+		if (progs.blockscompressed&8)
+		{
+			SafeWrite (h, &len, sizeof(int));	//save for later
+			len = QC_encode(progfuncs, numfunctions*sizeof(QCC_dfunction_t), 2, (char *)functions, h);	//write
+			i = SafeSeek (h, 0, SEEK_CUR);
+			SafeSeek(h, progs.ofs_functions, SEEK_SET);//seek back
+			len = PRLittleLong(len);
+			SafeWrite (h, &len, sizeof(int));	//write size.
+			SafeSeek(h, i, SEEK_SET);
+		}
+		else
+			SafeWrite (h, functions, numfunctions*sizeof(QCC_dfunction_t));
+		break;
+	default:
+		Sys_Error("structtype error");
 	}
 
-	if (progs.blockscompressed&8)
-	{		
-		SafeWrite (h, &len, sizeof(int));	//save for later
-		len = QC_encode(progfuncs, numfunctions*sizeof(QCC_dfunction_t), 2, (char *)functions, h);	//write
-		i = SafeSeek (h, 0, SEEK_CUR);
-		SafeSeek(h, progs.ofs_functions, SEEK_SET);//seek back
-		len = PRLittleLong(len);
-		SafeWrite (h, &len, sizeof(int));	//write size.
-		SafeSeek(h, i, SEEK_SET);
-	}
-	else
-		SafeWrite (h, functions, numfunctions*sizeof(QCC_dfunction_t));
-
-	switch(outputsize)
+	switch(outputsttype)
 	{
-	case 32:
+	case PST_QTEST:
+		// qtest needs a struct remap but should be able to get away with a simple swap here
+		for (i=0 ; i<numglobaldefs ; i++)
+		{
+			qtest_def_t qtdef = ((qtest_def_t *)qcc_globals)[i];
+			qcc_globals[i].type = qtdef.type;
+			qcc_globals[i].ofs = qtdef.ofs;
+			qcc_globals[i].s_name = qtdef.s_name;
+		}
+		for (i=0 ; i<numfielddefs ; i++)
+		{
+			qtest_def_t qtdef = ((qtest_def_t *)fields)[i];
+			fields[i].type = qtdef.type;
+			fields[i].ofs = qtdef.ofs;
+			fields[i].s_name = qtdef.s_name;
+		}
+		// passthrough.. reuse FTE32 code
+	case PST_FTE32:
 		progs.ofs_globaldefs = SafeSeek (h, 0, SEEK_CUR);
 		progs.numglobaldefs = numglobaldefs;
 		for (i=0 ; i<numglobaldefs ; i++)
@@ -1008,7 +1113,7 @@ strofs = (strofs+3)&~3;
 		}
 
 		if (progs.blockscompressed&2)
-		{		
+		{
 			SafeWrite (h, &len, sizeof(int));	//save for later
 			len = QC_encode(progfuncs, numglobaldefs*sizeof(QCC_ddef_t), 2, (char *)qcc_globals, h);	//write
 			i = SafeSeek (h, 0, SEEK_CUR);
@@ -1031,7 +1136,7 @@ strofs = (strofs+3)&~3;
 		}
 
 		if (progs.blockscompressed&4)
-		{		
+		{
 			SafeWrite (h, &len, sizeof(int));	//save for later
 			len = QC_encode(progfuncs, numfielddefs*sizeof(QCC_ddef_t), 2, (char *)fields, h);	//write
 			i = SafeSeek (h, 0, SEEK_CUR);
@@ -1043,7 +1148,8 @@ strofs = (strofs+3)&~3;
 		else
 			SafeWrite (h, fields, numfielddefs*sizeof(QCC_ddef_t));
 		break;
-	case 16:
+	case PST_KKQWSV:
+	case PST_DEFAULT:
 #define qcc_globals16 ((QCC_ddef16_t*)qcc_globals)
 #define fields16 ((QCC_ddef16_t*)fields)
 		progs.ofs_globaldefs = SafeSeek (h, 0, SEEK_CUR);
@@ -1056,7 +1162,7 @@ strofs = (strofs+3)&~3;
 		}
 
 		if (progs.blockscompressed&2)
-		{		
+		{
 			SafeWrite (h, &len, sizeof(int));	//save for later
 			len = QC_encode(progfuncs, numglobaldefs*sizeof(QCC_ddef16_t), 2, (char *)qcc_globals16, h);	//write
 			i = SafeSeek (h, 0, SEEK_CUR);
@@ -1079,7 +1185,7 @@ strofs = (strofs+3)&~3;
 		}
 
 		if (progs.blockscompressed&4)
-		{		
+		{
 			SafeWrite (h, &len, sizeof(int));	//save for later
 			len = QC_encode(progfuncs, numfielddefs*sizeof(QCC_ddef16_t), 2, (char *)fields16, h);	//write
 			i = SafeSeek (h, 0, SEEK_CUR);
@@ -1092,7 +1198,7 @@ strofs = (strofs+3)&~3;
 			SafeWrite (h, fields16, numfielddefs*sizeof(QCC_ddef16_t));
 		break;
 	default:
-		Sys_Error("intsize error");
+		Sys_Error("structtype error");
 	}
 
 	progs.ofs_globals = SafeSeek (h, 0, SEEK_CUR);
@@ -1102,7 +1208,7 @@ strofs = (strofs+3)&~3;
 		((int *)qcc_pr_globals)[i] = PRLittleLong (((int *)qcc_pr_globals)[i]);
 
 	if (progs.blockscompressed&32)
-	{		
+	{
 		SafeWrite (h, &len, sizeof(int));	//save for later
 		len = QC_encode(progfuncs, numpr_globals*4, 2, (char *)qcc_pr_globals, h);	//write
 		i = SafeSeek (h, 0, SEEK_CUR);
@@ -1112,7 +1218,7 @@ strofs = (strofs+3)&~3;
 		SafeSeek(h, i, SEEK_SET);
 	}
 	else
-		SafeWrite (h, qcc_pr_globals, numpr_globals*4);	
+		SafeWrite (h, qcc_pr_globals, numpr_globals*4);
 
 	if (types)
 	for (i=0 ; i<numtypeinfos ; i++)
@@ -1121,7 +1227,7 @@ strofs = (strofs+3)&~3;
 			qcc_typeinfo[i].aux_type = (QCC_type_t*)(qcc_typeinfo[i].aux_type - qcc_typeinfo);
 		if (qcc_typeinfo[i].next)
 			qcc_typeinfo[i].next = (QCC_type_t*)(qcc_typeinfo[i].next - qcc_typeinfo);
-		qcc_typeinfo[i].name = (char *)QCC_CopyDupBackString(qcc_typeinfo[i].name);
+		qcc_typeinfo[i].name = (char*)QCC_CopyDupBackString(qcc_typeinfo[i].name);
 	}
 
 	progs.ofsfiles = 0;
@@ -1134,6 +1240,9 @@ strofs = (strofs+3)&~3;
 
 	switch(qcc_targetformat)
 	{
+	case QCF_QTEST:
+		progs.version = PROG_QTESTVERSION;
+		break;
 	case QCF_KK7:
 		progs.version = PROG_KKQWSVVERSION;
 		break;
@@ -1146,19 +1255,19 @@ strofs = (strofs+3)&~3;
 	case QCF_FTEDEBUG:
 		progs.version = PROG_EXTENDEDVERSION;
 
-		if (outputsize == 32)
+		if (outputsttype == PST_FTE32)
 			progs.secondaryversion = PROG_SECONDARYVERSION32;
 		else
 			progs.secondaryversion = PROG_SECONDARYVERSION16;
 
 		progs.ofsbodylessfuncs = SafeSeek (h, 0, SEEK_CUR);
-		progs.numbodylessfuncs = WriteBodylessFuncs(h);		
+		progs.numbodylessfuncs = WriteBodylessFuncs(h);
 
 		if (debugtarget)
 		{
 			progs.ofslinenums = SafeSeek (h, 0, SEEK_CUR);
 			if (progs.blockscompressed&64)
-			{		
+			{
 				SafeWrite (h, &len, sizeof(int));	//save for later
 				len = QC_encode(progfuncs, numstatements*sizeof(int), 2, (char *)statement_linenums, h);	//write
 				i = SafeSeek (h, 0, SEEK_CUR);
@@ -1177,7 +1286,7 @@ strofs = (strofs+3)&~3;
 		{
 			progs.ofs_types = SafeSeek (h, 0, SEEK_CUR);
 			if (progs.blockscompressed&128)
-			{		
+			{
 				SafeWrite (h, &len, sizeof(int));	//save for later
 				len = QC_encode(progfuncs, sizeof(QCC_type_t)*numtypeinfos, 2, (char *)qcc_typeinfo, h);	//write
 				i = SafeSeek (h, 0, SEEK_CUR);
@@ -1188,7 +1297,7 @@ strofs = (strofs+3)&~3;
 			}
 			else
 				SafeWrite (h, qcc_typeinfo, sizeof(QCC_type_t)*numtypeinfos);
-			progs.numtypes = numtypeinfos;		
+			progs.numtypes = numtypeinfos;
 		}
 		else
 		{
@@ -1210,9 +1319,9 @@ strofs = (strofs+3)&~3;
 // qbyte swap the header and write it out
 
 	for (i=0 ; i<sizeof(progs)/4 ; i++)
-		((int *)&progs)[i] = PRLittleLong ( ((int *)&progs)[i] );		
+		((int *)&progs)[i] = PRLittleLong ( ((int *)&progs)[i] );
 
-	
+
 	SafeSeek (h, 0, SEEK_SET);
 	SafeWrite (h, &progs, sizeof(progs));
 	SafeClose (h);
@@ -1259,7 +1368,7 @@ char *QCC_PR_String (char *string)
 {
 	static char buf[80];
 	char	*s;
-	
+
 	s = buf;
 	*s++ = '"';
 	while (string && *string)
@@ -1297,7 +1406,7 @@ char *QCC_PR_String (char *string)
 QCC_def_t	*QCC_PR_DefForFieldOfs (gofs_t ofs)
 {
 	QCC_def_t	*d;
-	
+
 	for (d=pr.def_head.next ; d ; d=d->next)
 	{
 		if (d->type->type != ev_field)
@@ -1321,13 +1430,13 @@ char *QCC_PR_ValueString (etype_t type, void *val)
 	static char	line[256];
 	QCC_def_t		*def;
 	QCC_dfunction_t	*f;
-	
+
 	switch (type)
 	{
 	case ev_string:
 		sprintf (line, "%s", QCC_PR_String(strings + *(int *)val));
 		break;
-	case ev_entity:	
+	case ev_entity:
 		sprintf (line, "entity %i", *(int *)val);
 		break;
 	case ev_function:
@@ -1360,7 +1469,7 @@ char *QCC_PR_ValueString (etype_t type, void *val)
 		sprintf (line, "bad type %i", type);
 		break;
 	}
-	
+
 	return line;
 }
 
@@ -1378,7 +1487,7 @@ padded to 20 field width
 	QCC_def_t	*def;
 	void	*val;
 	static char	line[128];
-	
+
 	val = (void *)&qcc_pr_globals[ofs];
 	def = pr_global_defs[ofs];
 	if (!def)
@@ -1386,12 +1495,12 @@ padded to 20 field width
 		sprintf (line,"%i(?""?""?)", ofs);
 	else
 		sprintf (line,"%i(%s)", ofs, def->name);
-	
+
 	i = strlen(line);
 	for ( ; i<16 ; i++)
 		strcat (line," ");
 	strcat (line," ");
-		
+
 	return line;
 }
 
@@ -1402,7 +1511,7 @@ char *QCC_PR_GlobalString (gofs_t ofs)
 	QCC_def_t	*def;
 	void	*val;
 	static char	line[128];
-	
+
 	val = (void *)&qcc_pr_globals[ofs];
 	def = pr_global_defs[ofs];
 	if (!def)
@@ -1414,12 +1523,12 @@ char *QCC_PR_GlobalString (gofs_t ofs)
 	}
 	else
 		sprintf (line,"%i(%s)", ofs, def->name);
-	
+
 	i = strlen(line);
 	for ( ; i<16 ; i++)
 		strcat (line," ");
 	strcat (line," ");
-		
+
 	return line;
 }*/
 
@@ -1441,12 +1550,12 @@ PR_PrintStatement
 /*void QCC_PR_PrintStatement (QCC_dstatement_t *s)
 {
 	int		i;
-	
+
 	printf ("%4i : %4i : %s ", (int)(s - statements), statement_linenums[s-statements], pr_opcodes[s->op].opname);
 	i = strlen(pr_opcodes[s->op].opname);
 	for ( ; i<10 ; i++)
 		printf (" ");
-		
+
 	if (s->op == OP_IF || s->op == OP_IFNOT)
 		printf ("%sbranch %i",QCC_PR_GlobalString(s->a),s->b);
 	else if (s->op == OP_GOTO)
@@ -1479,7 +1588,7 @@ PR_PrintDefs
 /*void QCC_PR_PrintDefs (void)
 {
 	QCC_def_t	*d;
-	
+
 	for (d=pr.def_head.next ; d ; d=d->next)
 		QCC_PR_PrintOfs (d->ofs);
 }*/
@@ -1493,7 +1602,7 @@ QCC_type_t *QCC_PR_NewType (char *name, int basictype)
 	qcc_typeinfo[numtypeinfos].name = name;
 	qcc_typeinfo[numtypeinfos].num_parms = 0;
 	qcc_typeinfo[numtypeinfos].param = NULL;
-	qcc_typeinfo[numtypeinfos].size = type_size[basictype];	
+	qcc_typeinfo[numtypeinfos].size = type_size[basictype];
 
 
 	numtypeinfos++;
@@ -1514,7 +1623,7 @@ void	QCC_PR_BeginCompilation (void *memory, int memsize)
 	extern struct freeoffset_s *freeofs;
 	int		i;
 	char name[16];
-	
+
 	pr.memory = memory;
 	pr.max_memory = memsize;
 
@@ -1523,20 +1632,20 @@ void	QCC_PR_BeginCompilation (void *memory, int memsize)
 	QCC_PR_ResetErrorScope();
 	pr_scope = NULL;
 
-/*	numpr_globals = RESERVED_OFS;	
-	
+/*	numpr_globals = RESERVED_OFS;
+
 	for (i=0 ; i<RESERVED_OFS ; i++)
 		pr_global_defs[i] = &def_void;
 */
-	
+
 	type_void = QCC_PR_NewType("void", ev_void);
 	type_string = QCC_PR_NewType("string", ev_string);
 	type_float = QCC_PR_NewType("float", ev_float);
 	type_vector = QCC_PR_NewType("vector", ev_vector);
 	type_entity = QCC_PR_NewType("entity", ev_entity);
-	type_field = QCC_PR_NewType("field", ev_field);	
+	type_field = QCC_PR_NewType("field", ev_field);
 	type_function = QCC_PR_NewType("function", ev_function);
-	type_pointer = QCC_PR_NewType("pointer", ev_pointer);	
+	type_pointer = QCC_PR_NewType("pointer", ev_pointer);
 	type_integer = QCC_PR_NewType("__integer", ev_integer);
 	type_variant = QCC_PR_NewType("__variant", ev_variant);
 
@@ -1552,7 +1661,7 @@ void	QCC_PR_BeginCompilation (void *memory, int memsize)
 		type_integer = QCC_PR_NewType("integer", ev_integer);
 	if (keyword_int)
 		type_integer = QCC_PR_NewType("int", ev_integer);
-	
+
 
 
 	if (output_parms)
@@ -1594,9 +1703,9 @@ int QCC_PR_FinishCompilation (void)
 {
 	QCC_def_t		*d;
 	int	errors;
-	
+
 	errors = false;
-	
+
 // check to make sure all functions prototyped have code
 	for (d=pr.def_head.next ; d ; d=d->next)
 	{
@@ -1606,6 +1715,7 @@ int QCC_PR_FinishCompilation (void)
 //			if (!f || (!f->code && !f->builtin) )
 			if (d->initialized==0)
 			{
+				s_file = d->s_file;
 				if (!strncmp(d->name, "ArrayGet*", 9))
 				{
 					QCC_PR_EmitArrayGetFunction(d, d->name+9);
@@ -1627,6 +1737,7 @@ int QCC_PR_FinishCompilation (void)
 					bodylessfuncs = true;
 					errors = true;
 				}
+				s_file = NULL;
 //				errors = true;
 			}
 			else if (d->initialized==2)
@@ -1748,7 +1859,7 @@ static void Add3(char *p, unsigned short *crc, char *file)
 {
 	char *s;
 	for(s=p;*s;s++)
-		QCC_CRC_ProcessByte(crc, *s);	
+		QCC_CRC_ProcessByte(crc, *s);
 }
 #define ADD3(p) Add3(p, &crc, file)
 
@@ -1764,7 +1875,7 @@ unsigned short QCC_PR_WriteProgdefs (char *filename)
 	file[0] = '\0';
 
 	QCC_CRC_Init (&crc);
-	
+
 // print global vars until the first field is defined
 
 	//ADD: crc and dump
@@ -1779,7 +1890,7 @@ unsigned short QCC_PR_WriteProgdefs (char *filename)
 	ADD2("File generated by FTEQCC, relevent for engine modding only, the generated crc must be the same as your engine expects.");
 	ADD(" */\n\ntypedef struct");
 	ADD2(" globalvars_s");
-	ADD(qcva("\n{"));	
+	ADD(qcva("\n{"));
 	ADD2("\tint pad;\n"
 		"\tint ofs_return[3];\n"	//makes it easier with the get globals func
 		"\tint ofs_parm0[3];\n"
@@ -1797,7 +1908,7 @@ unsigned short QCC_PR_WriteProgdefs (char *filename)
 			break;
 		if (d->ofs<RESERVED_OFS)
 			continue;
-			
+
 		switch (d->type->type)
 		{
 		case ev_float:
@@ -1834,10 +1945,10 @@ unsigned short QCC_PR_WriteProgdefs (char *filename)
 	{
 		if (!strcmp (d->name, "end_sys_fields"))
 			break;
-			
+
 		if (d->type->type != ev_field)
 			continue;
-			
+
 		switch (d->type->aux_type->type)
 		{
 		case ev_float:
@@ -1877,7 +1988,7 @@ unsigned short QCC_PR_WriteProgdefs (char *filename)
 		if (d->type->type != ev_field)
 			continue;
 		if (f)
-			ADD2(",\n");	
+			ADD2(",\n");
 		ADD2(qcva("\t{%i,\t%i,\t\"%s\"}",G_INT(d->ofs), d->type->aux_type->type, d->name));
 		f = 1;
 	}
@@ -1963,14 +2074,14 @@ unsigned short QCC_PR_WriteProgdefs (char *filename)
 	int		i;
 	QCC_dstatement_t	*ds;
 	QCC_dfunction_t		*df;
-	
+
 	for (i=0 ; i<numfunctions ; i++)
 		if (!strcmp (name, strings + functions[i].s_name))
 			break;
 	if (i==numfunctions)
 		QCC_Error (ERR_NOFUNC, "No function named \"%s\"", name);
-	df = functions + i;	
-	
+	df = functions + i;
+
 	printf ("Statements for function %s:\n", name);
 	ds = statements + df->first_statement;
 	while (1)
@@ -2049,7 +2160,7 @@ void	QCC_CreatePath (char *path)
 {
 	/*
 	char	*ofs;
-	
+
 	for (ofs = path+1 ; *ofs ; ofs++)
 	{
 		if (*ofs == '/')
@@ -2080,12 +2191,12 @@ void QCC_PackFile (char *src, char *name)
 #if 1
 	char	*f;
 #else
-	int		in;	
+	int		in;
 	int		count;
 	char	buf[4096];
 #endif
 
-	
+
 	if ( (qbyte *)pf - (qbyte *)pfiles > sizeof(pfiles) )
 		QCC_Error (ERR_TOOMANYPAKFILES, "Too many files in pak file");
 
@@ -2118,7 +2229,7 @@ void QCC_PackFile (char *src, char *name)
 	printf ("%64s : %7i\n", pf->name, remaining);
 
 	packbytes += remaining;
-	
+
 	while (remaining)
 	{
 		if (remaining < sizeof(buf))
@@ -2149,15 +2260,15 @@ void QCC_CopyFile (char *src, char *dest)
 	int		in, out;
 	int		remaining, count;
 	char	buf[4096];
-	
+
 	print ("%s to %s\n", src, dest);
 
 	in = SafeOpenRead (src);
 	remaining = filelength (in);
-	
+
 	QCC_CreatePath (dest);
 	out = SafeOpenWrite (dest, remaining+10);
-	
+
 	while (remaining)
 	{
 		if (remaining < sizeof(buf))
@@ -2170,7 +2281,7 @@ void QCC_CopyFile (char *src, char *dest)
 	}
 
 	close (in);
-	SafeClose (out);	
+	SafeClose (out);
 	*/
 }
 
@@ -2202,7 +2313,7 @@ void _QCC_CopyFiles (int blocknum, int copytype, char *srcdir, char *destdir)
 	for (i=0 ; i<numsounds ; i++)
 	{
 		if (precache_sounds_block[i] != blocknum)
-			continue;		
+			continue;
 		sprintf (srcfile,"%s%s",srcdir, precache_sounds[i]);
 		sprintf (destfile,"%s%s",destdir, precache_sounds[i]);
 		if (copytype == 1)
@@ -2265,7 +2376,7 @@ void _QCC_CopyFiles (int blocknum, int copytype, char *srcdir, char *destdir)
 		else
 			QCC_PackFile (srcfile, precache_files[i]);
 	}
-	
+
 	if (copytype == 2)
 	{
 		header.id[0] = 'P';
@@ -2275,18 +2386,18 @@ void _QCC_CopyFiles (int blocknum, int copytype, char *srcdir, char *destdir)
 		dirlen = (qbyte *)pf - (qbyte *)pfiles;
 		header.dirofs = PRLittleLong(SafeSeek (packhandle, 0, SEEK_CUR));
 		header.dirlen = PRLittleLong(dirlen);
-		
+
 		SafeWrite (packhandle, pfiles, dirlen);
-	
+
 		SafeSeek (packhandle, 0, SEEK_SET);
 		SafeWrite (packhandle, &header, sizeof(header));
-		SafeClose (packhandle);	
-	
+		SafeClose (packhandle);
+
 	// do a crc of the file
 		QCC_CRC_Init (&crc);
 		for (i=0 ; i<dirlen ; i++)
 			QCC_CRC_ProcessByte (&crc, ((qbyte *)pfiles)[i]);
-	
+
 		i = pf - pfiles;
 		printf ("%i files packed in %i bytes (%i crc)\n",i, packbytes, crc);
 	}
@@ -2296,7 +2407,7 @@ void QCC_CopyFiles (void)
 {
 	char *s;
 	char	srcdir[1024], destdir[1024];
-	int		p;					
+	int		p;
 
 	if (verbose)
 	{
@@ -2327,7 +2438,7 @@ void QCC_CopyFiles (void)
 
 	for ( p = 0; p < 5; p++)
 	{
-		s = QCC_Packname[p];		
+		s = QCC_Packname[p];
 		if (!*s)
 			continue;
 		strcpy(destdir, s);
@@ -2351,7 +2462,7 @@ void QCC_CopyFiles (void)
 			strcat (srcdir, "/");
 		DefaultExtension (destdir, ".pak");
 
-	
+
 		copytype = 2;
 
 		_QCC_CopyFiles(blocknum, copytype, srcdir, destdir);
@@ -2383,10 +2494,8 @@ void QCC_PR_CommandLinePrecompilerOptions (void)
 			cnst = QCC_PR_DefineName(name);
 			if (val)
 			{
-				if (strlen(val)+1 >= sizeof(cnst->value))
-					QCC_Error(ERR_PRECOMPILERCONSTANTTOOLONG, "Compiler constant value is too long\n");
-				strncpy(cnst->value, val, sizeof(cnst->value)-1);
-				cnst->value[sizeof(cnst->value)-1] = '\0';
+				cnst->value = qccHunkAlloc(strlen(val)+1);
+				memcpy(cnst->value, val, strlen(val)+1);
 			}
 		}
 
@@ -2424,7 +2533,7 @@ void QCC_PR_CommandLinePrecompilerOptions (void)
 			if (!optimisations[p].enabled)
 				QCC_PR_Warning(0, NULL, WARN_BADPARAMS, "Unrecognised optimisation parameter (%s)", myargv[i]);
 		}
-		
+
 		else if ( !strnicmp(myargv[i], "-K", 2) || !strnicmp(myargv[i], "/K", 2) )
 		{
 			p = 0;
@@ -2759,7 +2868,7 @@ void QCC_main (int argc, char **argv)	//as part of the quake engine
 
 	MAX_REGS		= 65536;
 	MAX_STRINGS		= 1000000;
-	MAX_GLOBALS		= 32768;
+	MAX_GLOBALS		= 65535;
 	MAX_FIELDS		= 2048;
 	MAX_STATEMENTS	= 0x80000;
 	MAX_FUNCTIONS	= 16384;
@@ -2800,10 +2909,10 @@ void QCC_main (int argc, char **argv)	//as part of the quake engine
 				MAX_FUNCTIONS = atoi(qcc_token);
 			} else if (!strcmp(qcc_token, "MAX_TYPES")) {
 				s = QCC_COM_Parse(s);
-				maxtypeinfos = atoi(qcc_token);			
+				maxtypeinfos = atoi(qcc_token);
 			} else if (!strcmp(qcc_token, "MAX_TEMPS")) {
 				s = QCC_COM_Parse(s);
-				max_temps = atoi(qcc_token);			
+				max_temps = atoi(qcc_token);
 			} else if (!strcmp(qcc_token, "CONSTANTS")) {
 				s = QCC_COM_Parse(s);
 				MAX_CONSTANTS = atoi(qcc_token);
@@ -2865,7 +2974,7 @@ void QCC_main (int argc, char **argv)	//as part of the quake engine
 
 	numtemps = 0;
 
-	functemps=NULL;
+	QCC_PurgeTemps();
 
 	strings = (void *)qccHunkAlloc(sizeof(char) * MAX_STRINGS);
 	strofs = 1;
@@ -2893,7 +3002,7 @@ void QCC_main (int argc, char **argv)	//as part of the quake engine
 //	pr_global_defs = (QCC_def_t **)qccHunkAlloc(sizeof(QCC_def_t *) * MAX_REGS);
 
 	qcc_globals = (void *)qccHunkAlloc(sizeof(QCC_ddef_t) * MAX_GLOBALS);
-	numglobaldefs=0;	
+	numglobaldefs=0;
 
 	fields = (void *)qccHunkAlloc(sizeof(QCC_ddef_t) * MAX_FIELDS);
 	numfielddefs=0;
@@ -2930,7 +3039,7 @@ memset(pr_immediate_string, 0, sizeof(pr_immediate_string));
 #ifdef MAX_EXTRA_PARMS
 	memset(&extra_parms, 0, sizeof(extra_parms));
 #endif
-	
+
 	if ( QCC_CheckParm ("/?") || QCC_CheckParm ("?") || QCC_CheckParm ("-?") || QCC_CheckParm ("-help") || QCC_CheckParm ("--help"))
 	{
 		printf ("qcc looks for progs.src in the current directory.\n");
@@ -2950,7 +3059,7 @@ memset(pr_immediate_string, 0, sizeof(pr_immediate_string));
 		printf ("-Wall to give a stupid number of warnings\n");
 		printf ("-Ttarget to set a output format\n");
 		printf ("-Fautoproto to enable automatic prototyping\n");
-		printf ("-Fsubscope to enable subscopes\n");
+		printf ("-Fsubscope to make locals specific to their subscope\n");
 
 		qcc_compileactive = false;
 		return;
@@ -2967,7 +3076,7 @@ memset(pr_immediate_string, 0, sizeof(pr_immediate_string));
 
 	if (opt_locals_marshalling)
 		printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\nLocals marshalling might be buggy. Use with caution\n!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
-	
+
 	p = QCC_CheckParm ("-src");
 	if (p && p < argc-1 )
 	{
@@ -2995,12 +3104,12 @@ memset(pr_immediate_string, 0, sizeof(pr_immediate_string));
 			if (!p || p >= argc-1 || argv[p+1][0] == '-')
 				p = QCC_CheckParm ("-srcfile");
 			if (p && p < argc-1 )
-				sprintf (qccmprogsdat, "%s%s", qccmsourcedir, argv[p+1]);		
+				sprintf (qccmprogsdat, "%s", argv[p+1]);
 			else
 			{	//look for a preprogs.src... :o)
-				sprintf (qccmprogsdat, "%spreprogs.src", qccmsourcedir);
+				sprintf (qccmprogsdat, "preprogs.src");
 				if (externs->FileSize(qccmprogsdat) <= 0)
-					sprintf (qccmprogsdat, "%sprogs.src", qccmsourcedir);
+					sprintf (qccmprogsdat, "progs.src");
 			}
 
 			numsourcefiles = 0;
@@ -3019,12 +3128,11 @@ memset(pr_immediate_string, 0, sizeof(pr_immediate_string));
 		if (currentsourcefile)
 			printf("-------------------------------------\n");
 
-		strcpy(qccmprogsdat, sourcefileslist[currentsourcefile++]);
-
+		sprintf (qccmprogsdat, "%s%s", qccmsourcedir, sourcefileslist[currentsourcefile++]);
 		printf ("Source file: %s\n", qccmprogsdat);
 
 		if (QCC_LoadFile (qccmprogsdat, (void *)&qccmsrc) == -1)
-		{		
+		{
 			return;
 		}
 	}
@@ -3057,7 +3165,7 @@ memset(pr_immediate_string, 0, sizeof(pr_immediate_string));
 	}
 
 	if (*qcc_token == '#')
-	{		
+	{
 		void StartNewStyleCompile(void);
 newstyle:
 		newstylesource = true;
@@ -3081,7 +3189,7 @@ newstyle:
 
 #ifndef QCCONLY
 	p=0;
-	s2 = strcpy(destfile2, destfile);	
+	s2 = strcpy(destfile2, destfile);
 	if (!strncmp(s2, "./", 2))
 		s2+=2;
 	else
@@ -3113,8 +3221,37 @@ newstyle:
 	}
 #endif
 
+	if (flag_filetimes)
+	{
+		struct stat s, os;
+		pbool modified = false;
+
+		if (stat(destfile, &os) != -1)
+		{
+			while ((pr_file_p=QCC_COM_Parse(pr_file_p)))
+			{
+				if (stat(qcc_token, &s) == -1 || s.st_mtime > os.st_mtime)
+				{
+					printf("%s changed\n", qcc_token);
+					modified = true;
+					break;
+				}
+			}
+			if (!modified)
+			{
+				printf("No changes\n");
+				qcc_compileactive = false;
+				return;
+			}
+			else
+			{
+				pr_file_p = qccmsrc;
+			}
+		}
+	}
+
 	printf ("outputfile: %s\n", destfile);
-	
+
 	pr_dumpasm = false;
 
 	currentchunk = NULL;
@@ -3161,7 +3298,7 @@ void QCC_ContinueCompile(void)
 	strcpy (qccmfilename, qccmsourcedir);
 	while(1)
 	{
-		if (!strncmp(s, "..\\", 3))
+		if (!strncmp(s, "..\\", 3) || !strncmp(s, "../", 3))
 		{
 			s2 = qccmfilename + strlen(qccmfilename)-2;
 			while (s2>=qccmfilename)
@@ -3173,10 +3310,13 @@ void QCC_ContinueCompile(void)
 				}
 				s2--;
 			}
-			s+=3;
-			continue;
+			if (s2>=qccmfilename)
+			{
+				s+=3;
+				continue;
+			}
 		}
-		if (!strncmp(s, ".\\", 2))
+		if (!strncmp(s, ".\\", 2) || !strncmp(s, "./", 2))
 		{
 			s+=2;
 			continue;
@@ -3197,7 +3337,7 @@ void QCC_ContinueCompile(void)
 		QCC_Error (ERR_PARSEERRORS, "Errors have occured\n");
 }
 void QCC_FinishCompile(void)
-{	
+{
 	pbool donesomething;
 	int crc;
 //	int p;
@@ -3205,7 +3345,7 @@ void QCC_FinishCompile(void)
 
 	if (setjmp(pr_parse_abort))
 		QCC_Error(ERR_INTERNAL, "");
-	
+
 	if (!QCC_PR_FinishCompilation ())
 	{
 		QCC_Error (ERR_PARSEERRORS, "compilation errors");
@@ -3238,10 +3378,10 @@ void QCC_FinishCompile(void)
 
 // write progdefs.h
 	crc = QCC_PR_WriteProgdefs ("progdefs.h");
-	
+
 // write data file
 	donesomething = QCC_WriteData (crc);
-	
+
 // regenerate bmodels if -bspmodels
 	QCC_BspModels ();
 
@@ -3300,7 +3440,7 @@ void QCC_FinishCompile(void)
 				printf("optres_test1 %i\n", optres_test1);
 			if (optres_test2)
 				printf("optres_test2 %i\n", optres_test2);
-			
+
 			printf("numtemps %i\n", numtemps);
 		}
 		if (!flag_msvcstyle)
@@ -3381,7 +3521,7 @@ void new_QCC_ContinueCompile(void)
 	}
 
 	pr_scope = NULL;	// outside all functions
-				
+
 	QCC_PR_ParseDefs (NULL);
 }
 
@@ -3444,12 +3584,12 @@ void new_QCC_ContinueCompile(void)
 			QCC_PR_ClearGrabMacros ();	// clear the frame macros
 
 			compilingfile = filename;
-					
+
 			pr_file_p = qccmsrc2;
 			s_file = QCC_CopyString (filename);
 
 			pr_source_line = 0;
-			
+
 			QCC_PR_NewLine ();
 
 			QCC_PR_Lex ();	// read first token
@@ -3462,16 +3602,16 @@ void new_QCC_ContinueCompile(void)
 						return false;
 					QCC_PR_SkipToSemicolon ();
 					if (pr_token_type == tt_eof)
-						return false;		
+						return false;
 				}
 
 				pr_scope = NULL;	// outside all functions
-				
+
 				QCC_PR_ParseDefs ();
 			}
 		}
 	return (pr_error_count == 0);
-	
+
 }*/
 
 

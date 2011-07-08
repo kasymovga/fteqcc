@@ -10,16 +10,31 @@ optimisations:
 	instructions need to be chained. stuff that writes to C should be cacheable, etc. maybe we don't even need to do the write to C
 	it should also be possible to fold in eq+ifnot, so none of this silly storeing of floats in equality tests
 
+	this means that we need to track which vars are cached and in what form: fpreg, ireg+floatasint, ireg+float.
+	certain qccx hacks can use fpu operations on ints, so do what the instruction says, rather than considering an add an add regardless of types.
+
+	OP_AND_F, OP_OR_F etc will generally result in ints, and we should be able to keep them as ints if they combine with other ints.
+
+	some instructions are jump sites. any cache must be flushed before the start of the instruction.
+	some variables are locals, and will only ever be written by a single instruction, then read by the following instruction. such temps do not need to be written, or are overwritten later in the function anyway.
+	such locals need to be calculated PER FUNCTION as (fte)qcc can overlap locals making multiple distinct locals on a single offset.
+
+	store locals on a proper stack instead of the current absurd mechanism.
+
 	eax - tmp
 	ebx - prinst->edicttable
 	ecx	- tmp
 	edx - tmp
-	esi - 
+	esi - debug opcode number
 	edi - tmp (because its preserved by subfunctions
-	ebp - 
+	ebp -
 
   to use gas to provide binary opcodes:
   vim -N blob.s && as blob.s && objdump.exe -d a.out
+
+
+  notable mods to test:
+  prydon gate, due to fpu mangling to carry values between maps
 */
 
 #define PROGSUSED
@@ -29,59 +44,135 @@ optimisations:
 
 static float ta, tb, nullfloat=0;
 
-unsigned int *statementjumps;	//[MAX_STATEMENTS*2]
-unsigned char **statementoffsets; //[MAX_STATEMENTS]
-unsigned int numjumps;
-unsigned char *code;
-unsigned int codesize;
-unsigned int jitstatements;
+struct jitstate
+{
+	unsigned int *statementjumps;	//[MAX_STATEMENTS*3]
+	unsigned char **statementoffsets; //[MAX_STATEMENTS]
+	unsigned int numjumps;
+	unsigned char *code;
+	unsigned int codesize;
+	unsigned int jitstatements;
+};
 
-void EmitByte(unsigned char byte)
+static void EmitByte(struct jitstate *jit, unsigned char byte)
 {
-	code[codesize++] = byte;
+	jit->code[jit->codesize++] = byte;
 }
-void Emit4Byte(unsigned int value)
+static void Emit4Byte(struct jitstate *jit, unsigned int value)
 {
-	code[codesize++] = (value>> 0)&0xff;
-	code[codesize++] = (value>> 8)&0xff;
-	code[codesize++] = (value>>16)&0xff;
-	code[codesize++] = (value>>24)&0xff;
+	jit->code[jit->codesize++] = (value>> 0)&0xff;
+	jit->code[jit->codesize++] = (value>> 8)&0xff;
+	jit->code[jit->codesize++] = (value>>16)&0xff;
+	jit->code[jit->codesize++] = (value>>24)&0xff;
 }
-void EmitAdr(void *value)
+static void EmitAdr(struct jitstate *jit, void *value)
 {
-	Emit4Byte((unsigned int)value);
+	Emit4Byte(jit, (unsigned int)value);
 }
-void EmitFloat(float value)
+static void EmitFloat(struct jitstate *jit, float value)
 {
 	union {float f; unsigned int i;} u;
 	u.f = value;
-	Emit4Byte(u.i);
+	Emit4Byte(jit, u.i);
 }
-void Emit2Byte(unsigned short value)
+static void Emit2Byte(struct jitstate *jit, unsigned short value)
 {
-	code[codesize++] = (value>> 0)&0xff;
-	code[codesize++] = (value>> 8)&0xff;
+	jit->code[jit->codesize++] = (value>> 0)&0xff;
+	jit->code[jit->codesize++] = (value>> 8)&0xff;
 }
 
-void EmitFOffset(void *func, int bias)
+static void EmitFOffset(struct jitstate *jit, void *func, int bias)
 {
 	union {void *f; unsigned int i;} u;
 	u.f = func;
-	u.i -= (unsigned int)&code[codesize+bias];
-	Emit4Byte(u.i);
+	u.i -= (unsigned int)&jit->code[jit->codesize+bias];
+	Emit4Byte(jit, u.i);
 }
 
-void Emit4ByteJump(int statementnum, int offset)
+static void Emit4ByteJump(struct jitstate *jit, int statementnum, int offset)
 {
-	statementjumps[numjumps++] = codesize;
-	statementjumps[numjumps++] = statementnum;
-	statementjumps[numjumps++] = offset;
+	jit->statementjumps[jit->numjumps++] = jit->codesize;
+	jit->statementjumps[jit->numjumps++] = statementnum;
+	jit->statementjumps[jit->numjumps++] = offset;
 
 	//the offset is filled in later
-	codesize += 4;
+	jit->codesize += 4;
 }
 
-void FixupJumps(void)
+enum
+{
+	REG_EAX,
+	REG_ECX,
+	REG_EDX,
+	REG_EBX,
+	REG_ESP,
+	REG_EBP,
+	REG_ESI,
+	REG_EDI
+};
+#define XOR(sr,dr) EmitByte(0x31);EmitByte(0xc0 | (sr<<3) | dr);
+#define CLEARREG(reg) XOR(reg,reg)
+#define LOADREG(addr, reg) if (reg == REG_EAX) {EmitByte(0xa1);} else {EmitByte(0x8b); EmitByte((reg<<3) | 0x05);} EmitAdr(addr);
+#define STOREREG(reg, addr) if (reg == REG_EAX) {EmitByte(0xa3);} else {EmitByte(0x89); EmitByte((reg<<3) | 0x05);} EmitAdr(addr);
+#define STOREF(f, addr) EmitByte(0xc7);EmitByte(0x05); EmitAdr(addr);EmitFloat(f);
+#define STOREI(i, addr) EmitByte(0xc7);EmitByte(0x05); EmitAdr(addr);Emit4Byte(i);
+#define SETREGI(val,reg) EmitByte(0xbe);Emit4Byte(val);
+
+static void *LocalLoc(struct jitstate *jit)
+{
+	return &jit->code[jit->codesize];
+}
+static void *LocalJmp(struct jitstate *jit, int cond)
+{
+	/*floating point ops don't set the sign flag, thus we use the 'above/below' instructions instead of 'greater/less' instructions*/
+	if (cond == OP_GOTO)
+		EmitByte(jit, 0xeb);	//jmp
+	else if (cond == OP_LE_F)
+		EmitByte(jit, 0x76);	//jbe
+	else if (cond == OP_GE_F)
+		EmitByte(jit, 0x73);	//jae
+	else if (cond == OP_LT_F)
+		EmitByte(jit, 0x72);	//jb
+	else if (cond == OP_GT_F)
+		EmitByte(jit, 0x77);	//ja
+	else if (cond == OP_LE_I)
+		EmitByte(jit, 0x7e);	//jle
+	else if (cond == OP_LT_I)
+		EmitByte(jit, 0x7c);	//jl
+	else if ((cond >= OP_NE_F && cond <= OP_NE_FNC) || cond == OP_NE_I)
+		EmitByte(jit, 0x75);	//jne
+	else if ((cond >= OP_EQ_F && cond <= OP_EQ_FNC) || cond == OP_EQ_I)
+		EmitByte(jit, 0x74);	//je
+#if defined(DEBUG) && defined(_WIN32)
+	else
+	{
+		OutputDebugString("oh noes!\n");
+		return NULL;
+	}
+#endif
+
+	EmitByte(jit, 0);
+
+	return LocalLoc(jit);
+}
+static void LocalJmpLoc(void *jmp, void *loc)
+{
+	int offs;
+	unsigned char *a = jmp;
+	offs = (char *)loc - (char *)jmp;
+#if defined(DEBUG) && defined(_WIN32)
+	if (offs > 127 || offs <= -128)
+	{
+		OutputDebugStringA("bad jump\n");
+		a[-2] = 0xcd;
+		a[-1] = 0xcc;
+		return;
+	}
+#endif
+	a[-1] = offs;
+}
+
+static void FixupJumps(struct jitstate *jit)
 {
 	unsigned int j;
 	unsigned char *codesrc;
@@ -90,15 +181,15 @@ void FixupJumps(void)
 
 	unsigned int v;
 
-	for (j = 0; j < numjumps;)
+	for (j = 0; j < jit->numjumps;)
 	{
-		v = statementjumps[j++];
-		codesrc = &code[v];
+		v = jit->statementjumps[j++];
+		codesrc = &jit->code[v];
 
-		v = statementjumps[j++];
-		codedst = statementoffsets[v];
+		v = jit->statementjumps[j++];
+		codedst = jit->statementoffsets[v];
 
-		v = statementjumps[j++];
+		v = jit->statementjumps[j++];
 		offset = (int)(codedst - (codesrc-v));	//3rd term because the jump is relative to the instruction start, not the instruction's offset
 
 		codesrc[0] = (offset>> 0)&0xff;
@@ -108,53 +199,81 @@ void FixupJumps(void)
 	}
 }
 
-int PR_LeaveFunction (progfuncs_t *progfuncs);
-int PR_EnterFunction (progfuncs_t *progfuncs, dfunction_t *f, int progsnum);
+int ASMCALL PR_LeaveFunction (progfuncs_t *progfuncs);
+int ASMCALL PR_EnterFunction (progfuncs_t *progfuncs, dfunction_t *f, int progsnum);
 
-pbool PR_GenerateJit(progfuncs_t *progfuncs)
+void PR_CloseJit(struct jitstate *jit)
 {
+	free(jit->statementjumps);
+	free(jit->statementoffsets);
+	free(jit->code);
+}
+
+#define EmitByte(v) EmitByte(jit, v)
+#define EmitAdr(v) EmitAdr(jit, v)
+#define EmitFOffset(a,b) EmitFOffset(jit, a, b)
+#define Emit4ByteJump(a,b) Emit4ByteJump(jit, a, b)
+#define Emit4Byte(v) Emit4Byte(jit, v)
+#define EmitFloat(v) EmitFloat(jit, v)
+#define LocalJmp(v) LocalJmp(jit, v)
+#define LocalLoc() LocalLoc(jit)
+
+
+struct jitstate *PR_GenerateJit(progfuncs_t *progfuncs)
+{
+	struct jitstate *jit;
+
+	void *j0, *l0;
+	void *j1, *l1;
+	void *j2, *l2;
 	unsigned int i;
 	dstatement16_t *op = (dstatement16_t*)current_progstate->statements;
 	unsigned int numstatements = current_progstate->progs->numstatements;
 	int *glob = (int*)current_progstate->globals;
 
 	if (current_progstate->numbuiltins)
-		return false;
+		return NULL;
+	jit = malloc(sizeof(*jit));
+	jit->jitstatements = numstatements;
 
-	jitstatements = numstatements;
+	jit->statementjumps = malloc(numstatements*12);
+	jit->statementoffsets = malloc(numstatements*4);
+	jit->code = malloc(numstatements*500);
+	if (!jit->code)
+		return NULL;
 
-	statementjumps = malloc(numstatements*12);
-	statementoffsets = malloc(numstatements*4);
-	code = malloc(numstatements*500);
-
-	numjumps = 0;
-	codesize = 0;
+	jit->numjumps = 0;
+	jit->codesize = 0;
 
 
 
 	for (i = 0; i < numstatements; i++)
 	{
-		statementoffsets[i] = &code[codesize];
+		jit->statementoffsets[i] = &jit->code[jit->codesize];
+
+		/*DEBUG*/
+		SETREGI(op[i].op, REG_ESI);
+
 		switch(op[i].op)
 		{
 		//jumps
-		case OP_IF:
+		case OP_IF_I:
 			//integer compare
 			//if a, goto b
 
 			//cmpl $0,glob[A]
 			EmitByte(0x83);EmitByte(0x3d);EmitAdr(glob + op[i].a);EmitByte(0x0);
-			//jnz B
+			//jne B
 			EmitByte(0x0f);EmitByte(0x85);Emit4ByteJump(i + (signed short)op[i].b, -4);
 			break;
 
-		case OP_IFNOT:
+		case OP_IFNOT_I:
 			//integer compare
 			//if !a, goto b
 
 			//cmpl $0,glob[A]
 			EmitByte(0x83);EmitByte(0x3d);EmitAdr(glob + op[i].a);EmitByte(0x0);
-			//jz B
+			//je B
 			EmitByte(0x0f);EmitByte(0x84);Emit4ByteJump(i + (signed short)op[i].b, -4);
 			break;
 
@@ -173,25 +292,19 @@ pbool PR_GenerateJit(progfuncs_t *progfuncs)
 			{
 				//assumption: anything that returns address 0 is a void or zero return.
 				//thus clear eax and copy that to the return vector.
-				EmitByte(0x31);EmitByte(0xc0);
-				EmitByte(0xa3);EmitAdr(glob + OFS_RETURN+0);
-				EmitByte(0xa3);EmitAdr(glob + OFS_RETURN+1);
-				EmitByte(0xa3);EmitAdr(glob + OFS_RETURN+2);
+				CLEARREG(REG_EAX);
+				STOREREG(REG_EAX, glob + OFS_RETURN+0);
+				STOREREG(REG_EAX, glob + OFS_RETURN+1);
+				STOREREG(REG_EAX, glob + OFS_RETURN+2);
 			}
 			else
 			{
-				//movl glob[A+0],eax
-				EmitByte(0xa1);EmitAdr(glob + op[i].a+0);
-				//movl glob[A+0],edx
-				EmitByte(0x8b);EmitByte(0x0d);EmitAdr(glob + op[i].a+1);
-				//movl glob[A+0],ecx
-				EmitByte(0x8b);EmitByte(0x15);EmitAdr(glob + op[i].a+2);
-				//movl eax, glob[OFS_RET+0]
-				EmitByte(0xa3);EmitAdr(glob + OFS_RETURN+0);
-				//movl edx, glob[OFS_RET+0]
-				EmitByte(0x89);EmitByte(0x15);EmitAdr(glob + OFS_RETURN+1);
-				//movl ecx, glob[OFS_RET+0]
-				EmitByte(0x89);EmitByte(0x15);EmitAdr(glob + OFS_RETURN+2);
+				LOADREG(glob + op[i].a+0, REG_EAX);
+				LOADREG(glob + op[i].a+1, REG_EDX);
+				LOADREG(glob + op[i].a+2, REG_ECX);
+				STOREREG(REG_EAX, glob + OFS_RETURN+0);
+				STOREREG(REG_EDX, glob + OFS_RETURN+1);
+				STOREREG(REG_ECX, glob + OFS_RETURN+2);
 			}
 			
 			//call leavefunction to get the return address
@@ -207,14 +320,17 @@ pbool PR_GenerateJit(progfuncs_t *progfuncs)
 //			cmp prinst->exitdepth,%edx
 			EmitByte(0x3b);EmitByte(0x15);EmitAdr(&prinst->exitdepth);
 //			je returntoc
-			EmitByte(0x74);EmitByte(0x09);
-//			mov statementoffsets[%eax*4],%eax
-			EmitByte(0x8b);EmitByte(0x04);EmitByte(0x85);EmitAdr(statementoffsets+1);
-//			jmp eax
-			EmitByte(0xff);EmitByte(0xe0);
+			j1 = LocalJmp(OP_EQ_E);
+//				mov statementoffsets[%eax*4],%eax
+				EmitByte(0x8b);EmitByte(0x04);EmitByte(0x85);EmitAdr(jit->statementoffsets+1);
+//				jmp *eax
+				EmitByte(0xff);EmitByte(0xe0);
 //			returntoc:
+			l1 = LocalLoc();
 //			ret
 			EmitByte(0xc3);
+
+			LocalJmpLoc(j1,l1);
 			break;
 
 		//function calls
@@ -229,13 +345,13 @@ pbool PR_GenerateJit(progfuncs_t *progfuncs)
 		case OP_CALL8:
 		//save the state in place the rest of the engine can cope with
 			//movl $i, pr_xstatement
-			EmitByte(0xc7);EmitByte(0x05);EmitAdr(&pr_xstatement);Emit4Byte(i);
+			EmitByte( 0xc7);EmitByte(0x05);EmitAdr(&pr_xstatement);Emit4Byte(i);
 			//movl $(op[i].op-OP_CALL0), pr_argc
-			EmitByte(0xc7);EmitByte(0x05);EmitAdr(&pr_argc);Emit4Byte(op[i].op-OP_CALL0);
+			EmitByte( 0xc7);EmitByte(0x05);EmitAdr(&pr_argc);Emit4Byte(op[i].op-OP_CALL0);
 
 		//figure out who we're calling, and what that involves
 			//%eax = glob[A]
-			EmitByte(0xa1); EmitAdr(glob + op[i].a);
+			LOADREG(glob + op[i].a, REG_EAX);
 		//eax is now the func num
 
 			//mov %eax,%ecx
@@ -247,7 +363,7 @@ pbool PR_GenerateJit(progfuncs_t *progfuncs)
 			//cmp %ecx,pr_typecurrent
 			EmitByte(0x39); EmitByte(0x0d); EmitAdr(&pr_typecurrent);
 			//je sameprogs
-			EmitByte(0x74); EmitByte(0x3);
+			j1 = LocalJmp(OP_EQ_I);
 			{
 				//can't handle switching progs
 
@@ -266,6 +382,8 @@ pbool PR_GenerateJit(progfuncs_t *progfuncs)
 				EmitByte(0xc3);
 			}
 			//sameprogs:
+			l1 = LocalLoc();
+			LocalJmpLoc(j1,l1);
 
 			//andl $0x00ffffff, %eax
 			EmitByte(0x25);Emit4Byte(0x00ffffff);
@@ -286,9 +404,9 @@ pbool PR_GenerateJit(progfuncs_t *progfuncs)
 			//cmp $0,%edx
 			EmitByte(0x83);EmitByte(0xfa);EmitByte(0x00);
 			//jl isabuiltin
-			EmitByte(0x7c);EmitByte(22);
-	
+			j1 = LocalJmp(OP_LT_I);
 			{
+				/* call the function*/
 				//push %ecx
 				EmitByte(0x51);
 				//push %eax
@@ -302,10 +420,12 @@ pbool PR_GenerateJit(progfuncs_t *progfuncs)
 		//eax is now the next statement number (first of the new function, usually equal to ecx, but not always)
 
 				//jmp statementoffsets[%eax*4]
-				EmitByte(0xff);EmitByte(0x24);EmitByte(0x85);EmitAdr(statementoffsets+1);
+				EmitByte(0xff);EmitByte(0x24);EmitByte(0x85);EmitAdr(jit->statementoffsets+1);
 			}
+			/*its a builtin, figure out which, and call it*/
 			//isabuiltin:
-
+			l1 = LocalLoc();
+			LocalJmpLoc(j1,l1);
 
 			//push current_progstate->globals
 			EmitByte(0x68);EmitAdr(current_progstate->globals);
@@ -321,23 +441,21 @@ pbool PR_GenerateJit(progfuncs_t *progfuncs)
 
 		//but that builtin might have been Abort()
 
-			//mov prinst->continuestatement,%eax
-			EmitByte(0xa1);EmitAdr(&prinst->continuestatement);
-		//eax is now prinst->continuestatement
-
+			LOADREG(&prinst->continuestatement, REG_EAX);
 			//cmp $-1,%eax
 			EmitByte(0x83);EmitByte(0xf8);EmitByte(0xff);
 			//je donebuiltincall
-			EmitByte(0x74);EmitByte(10+8);
+			j1 = LocalJmp(OP_EQ_I);
 			{
-EmitByte(0xcc);
-				//jmp statementoffsets[%eax*4]
-				EmitByte(0xff);EmitByte(0x24);EmitByte(0x85);EmitAdr(statementoffsets+1);
-
 				//mov $-1,prinst->continuestatement
-				EmitByte(0xc7);EmitByte(0x05);EmitAdr(&prinst->continuestatement+1);Emit4Byte((unsigned int)-1);
+				EmitByte(0xc7);EmitByte(0x05);EmitAdr(&prinst->continuestatement);Emit4Byte((unsigned int)-1);
+
+				//jmp statementoffsets[%eax*4]
+				EmitByte(0xff);EmitByte(0x24);EmitByte(0x85);EmitAdr(jit->statementoffsets);
 			}
 			//donebuiltincall:
+			l1 = LocalLoc();
+			LocalJmpLoc(j1,l1);
 			break;
 
 		case OP_MUL_F:
@@ -374,24 +492,29 @@ EmitByte(0xcc);
 			break;
 
 		case OP_NOT_F:
-			//flds glob[A]
-			EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + op[i].a);
 			//fldz
 			EmitByte(0xd9);EmitByte(0xee);
+			//fcomps	glob[A]
+			EmitByte(0xd8); EmitByte(0x1d); EmitAdr(glob + op[i].a);
 			//fnstsw %ax
 			EmitByte(0xdf);EmitByte(0xe0);
 			//testb 0x40,%ah
 			EmitByte(0xf6);EmitByte(0xc4);EmitByte(0x40);
-			//je noteq
-			EmitByte(0x74);EmitByte(0x0c);
-			//movl 1.0f,glob[C]
-			EmitByte(0xc7);EmitByte(0x05);EmitAdr(glob + op[i].c);EmitFloat(0.0f);
-			//jmp end
-			EmitByte(0xeb);EmitByte(0x0a);
-			//noteq:
-			//movl 0.0f,glob[C]
-			EmitByte(0xc7);EmitByte(0x05);EmitAdr(glob + op[i].c);EmitFloat(1.0f);
+			
+			j1 = LocalJmp(OP_NE_F);
+			{
+				STOREF(0.0f, glob + op[i].c);
+				j2 = LocalJmp(OP_GOTO);
+			}
+			{
+				//noteq:
+				l1 = LocalLoc();
+				STOREF(1.0f, glob + op[i].c);
+			}
 			//end:
+			l2 = LocalLoc();
+			LocalJmpLoc(j1,l1);
+			LocalJmpLoc(j2,l2);
 			break;
 
 		case OP_STORE_F:
@@ -399,26 +522,17 @@ EmitByte(0xcc);
 		case OP_STORE_ENT:
 		case OP_STORE_FLD:
 		case OP_STORE_FNC:
-			//movl glob[A],eax
-			EmitByte(0xa1);EmitAdr(glob + op[i].a);
-			//movl eax,glob[B]
-			EmitByte(0xa3);EmitAdr(glob + op[i].b);
+			LOADREG(glob + op[i].a, REG_EAX);
+			STOREREG(REG_EAX, glob + op[i].b);
 			break;
 
 		case OP_STORE_V:
-			//movl glob[A+0],eax
-			EmitByte(0xa1);EmitAdr(glob + op[i].a+0);
-			//movl glob[A+1],edx
-			EmitByte(0x8b);EmitByte(0x0d);EmitAdr(glob + op[i].a+1);
-			//movl glob[A+2],ecx
-			EmitByte(0x8b);EmitByte(0x15);EmitAdr(glob + op[i].a+2);
-
-			//movl eax, glob[B+0]
-			EmitByte(0xa3);EmitAdr(glob + op[i].b+0);
-			//movl edx, glob[B+1]
-			EmitByte(0x89);EmitByte(0x15);EmitAdr(glob + op[i].b+1);
-			//movl ecx, glob[B+2]
-			EmitByte(0x89);EmitByte(0x15);EmitAdr(glob + op[i].b+2);
+			LOADREG(glob + op[i].a+0, REG_EAX);
+			LOADREG(glob + op[i].a+1, REG_EDX);
+			LOADREG(glob + op[i].a+2, REG_ECX);
+			STOREREG(REG_EAX, glob + op[i].b+0);
+			STOREREG(REG_EDX, glob + op[i].b+1);
+			STOREREG(REG_ECX, glob + op[i].b+2);
 			break;
 
 		case OP_LOAD_F:
@@ -430,10 +544,9 @@ EmitByte(0xcc);
 		//a is the ent number, b is the field
 		//c is the dest
 
-			//movl glob[A+0],eax
-			EmitByte(0xa1);EmitAdr(glob + op[i].a);
-			//mov glob[B],ecx
-			EmitByte(0x8b); EmitByte(0x0d);EmitAdr(glob + op[i].b);
+			LOADREG(glob + op[i].a, REG_EAX);
+			LOADREG(glob + op[i].b, REG_ECX);
+
 		//FIXME: bound eax (ent number)
 		//FIXME: bound ecx (field index)
 			//mov (ebx,eax,4).%eax
@@ -443,22 +556,20 @@ EmitByte(0xcc);
 			EmitByte(0x8b);EmitByte(0x50);EmitByte((int)&((edictrun_t*)NULL)->fields);
 		//edx is now the field array for that ent
 
-			//mov fieldajust(%edx,%ecx,4),%eax	//offset = progfuncs->fieldadjust
+			//mov fieldajust(%edx,%ecx,4),%eax
 			EmitByte(0x8b); EmitByte(0x84); EmitByte(0x8a); Emit4Byte(progfuncs->fieldadjust*4);
-			//mov edx,glob[C]
-			EmitByte(0xa3);EmitAdr(glob + op[i].c);
+
+			STOREREG(REG_EAX, glob + op[i].c)
 
 			if (op[i].op == OP_LOAD_V)
 			{
-				//mov fieldajust+4(%edx,%ecx,4),%eax	//offset = progfuncs->fieldadjust
+				//mov fieldajust+4(%edx,%ecx,4),%eax
 				EmitByte(0x8b); EmitByte(0x84); EmitByte(0x8a); Emit4Byte(4+progfuncs->fieldadjust*4);
-				//mov edx,glob[C+1]
-				EmitByte(0xa3);EmitAdr(glob + op[i].c+1);
+				STOREREG(REG_EAX, glob + op[i].c+1)
 
-				//mov fieldajust+8(%edx,%ecx,4),%eax	//offset = progfuncs->fieldadjust
-				EmitByte(0x8b); EmitByte(0x84); EmitByte(0x8a); Emit4Byte(4+progfuncs->fieldadjust*4);
-				//mov edx,glob[C+1]
-				EmitByte(0xa3);EmitAdr(glob + op[i].c+2);
+				//mov fieldajust+8(%edx,%ecx,4),%eax
+				EmitByte(0x8b); EmitByte(0x84); EmitByte(0x8a); Emit4Byte(8+progfuncs->fieldadjust*4);
+				STOREREG(REG_EAX, glob + op[i].c+2)
 			}
 			break;
 
@@ -466,10 +577,9 @@ EmitByte(0xcc);
 			//a is the ent number, b is the field
 		//c is the dest
 
-			//movl glob[A+0],eax
-			EmitByte(0xa1);EmitAdr(glob + op[i].a);
-			//mov glob[B],ecx
-			EmitByte(0x8b); EmitByte(0x0d);EmitAdr(glob + op[i].b);
+			LOADREG(glob + op[i].a, REG_EAX);
+			LOADREG(glob + op[i].b, REG_ECX);
+
 		//FIXME: bound eax (ent number)
 		//FIXME: bound ecx (field index)
 			//mov (ebx,eax,4).%eax
@@ -481,8 +591,7 @@ EmitByte(0xcc);
 			//mov fieldajust(%edx,%ecx,4),%eax	//offset = progfuncs->fieldadjust
 			//EmitByte(0x8d); EmitByte(0x84); EmitByte(0x8a); EmitByte(progfuncs->fieldadjust*4);
 			EmitByte(0x8d); EmitByte(0x84); EmitByte(0x8a); Emit4Byte(progfuncs->fieldadjust*4);
-			//mov edx,glob[C]
-			EmitByte(0xa3);EmitAdr(glob + op[i].c);
+			STOREREG(REG_EAX, glob + op[i].c);
 			break;
 
 		case OP_STOREP_F:
@@ -490,118 +599,111 @@ EmitByte(0xcc);
 		case OP_STOREP_ENT:
 		case OP_STOREP_FLD:
 		case OP_STOREP_FNC:
-			//movl glob[A],eax
-			EmitByte(0xa1);EmitAdr(glob + op[i].a);
-			//mov glob[B],ecx
-			EmitByte(0x8b); EmitByte(0x0d);EmitAdr(glob + op[i].b);
+			LOADREG(glob + op[i].a, REG_EAX);
+			LOADREG(glob + op[i].b, REG_ECX);
 			//mov %eax,(%ecx)
 			EmitByte(0x89);EmitByte(0x01);
 			break;
 
 		case OP_STOREP_V:
-			//mov glob[B],ecx
-			EmitByte(0x8b); EmitByte(0x0d);EmitAdr(glob + op[i].b);
-			//movl glob[A],eax
-			EmitByte(0xa1);EmitAdr(glob + op[i].a+0);
+			LOADREG(glob + op[i].b, REG_ECX);
+
+			LOADREG(glob + op[i].a+0, REG_EAX);
 			//mov %eax,0(%ecx)
 			EmitByte(0x89);EmitByte(0x01);
-			//movl glob[A],eax
-			EmitByte(0xa1);EmitAdr(glob + op[i].a+0);
+
+			LOADREG(glob + op[i].a+1, REG_EAX);
 			//mov %eax,4(%ecx)
 			EmitByte(0x89);EmitByte(0x41);EmitByte(0x04);
-			//movl glob[A],eax
-			EmitByte(0xa1);EmitAdr(glob + op[i].a+0);
+
+			LOADREG(glob + op[i].a+2, REG_EAX);
 			//mov %eax,8(%ecx)
 			EmitByte(0x89);EmitByte(0x41);EmitByte(0x08);
 			break;
 
+		case OP_NE_I:
+		case OP_NE_E:
+		case OP_NE_FNC:
+		case OP_EQ_I:
 		case OP_EQ_E:
 		case OP_EQ_FNC:
 			//integer equality
-			//movl glob[A],%eax
-			EmitByte(0xa1);EmitAdr(glob + op[i].a);
+			LOADREG(glob + op[i].a, REG_EAX);
+
 			//cmp glob[B],%eax
-			EmitByte(0x3b); EmitByte(0x0f); EmitAdr(glob + op[i].b);
-			//je 12
-			EmitByte(0x74);EmitByte(0x0c);
-			//mov 0.0f,glob[C]
-			EmitByte(0xc7);EmitByte(0x05); EmitAdr(glob + op[i].a);EmitFloat(0.0f);
-			//jmp 10
-			EmitByte(0xeb);EmitByte(0x0a);
-			//mov 1.0f,glob[C]
-			EmitByte(0xc7);EmitByte(0x05); EmitAdr(glob + op[i].a);EmitFloat(1.0f);
+			EmitByte(0x3b); EmitByte(0x04); EmitByte(0x25); EmitAdr(glob + op[i].b);
+			j1 = LocalJmp(op[i].op);
+			{
+				STOREF(0.0f, glob + op[i].c);
+				j2 = LocalJmp(OP_GOTO);
+			}
+			{
+				l1 = LocalLoc();
+				STOREF(1.0f, glob + op[i].c);
+			}
+			l2 = LocalLoc();
+			LocalJmpLoc(j1,l1);
+			LocalJmpLoc(j2,l2);
 			break;
 
-		case OP_NE_E:
-		case OP_NE_FNC:
-			//integer equality
-			//movl glob[A],%eax
-			EmitByte(0xa1);EmitAdr(glob + op[i].a);
-			//cmp glob[B],%eax
-			EmitByte(0x3b); EmitByte(0x0f); EmitAdr(glob + op[i].b);
-			//je 12
-			EmitByte(0x74);EmitByte(0x0c);
-			//mov 0.0f,glob[C]
-			EmitByte(0xc7);EmitByte(0x05); EmitAdr(glob + op[i].a);EmitFloat(1.0f);
-			//jmp 10
-			EmitByte(0xeb);EmitByte(0x0a);
-			//mov 1.0f,glob[C]
-			EmitByte(0xc7);EmitByte(0x05); EmitAdr(glob + op[i].a);EmitFloat(0.0f);
-			break;
-
+		case OP_NOT_I:
 		case OP_NOT_ENT:
 		case OP_NOT_FNC:
-			//cmp glob[B],%eax
-			EmitByte(0x8c); EmitByte(0x3d); EmitAdr(glob + op[i].a);EmitByte(0x00);
-			//je 12
-			EmitByte(0x74);EmitByte(0x0c);
-			//mov 0.0f,glob[C]
-			EmitByte(0xc7);EmitByte(0x05); EmitAdr(glob + op[i].a);EmitFloat(0.0f);
-			//jmp 10
-			EmitByte(0xeb);EmitByte(0x0a);
-			//mov 1.0f,glob[C]
-			EmitByte(0xc7);EmitByte(0x05); EmitAdr(glob + op[i].c);EmitFloat(1.0f);
+			//cmp glob[B],$0
+			EmitByte(0x83); EmitByte(0x3d); EmitAdr(glob + op[i].a); EmitByte(0x00); 
+			j1 = LocalJmp(OP_NE_I);
+			{
+				STOREF(1.0f, glob + op[i].c);
+				j2 = LocalJmp(OP_GOTO);
+			}
+			{
+				l1 = LocalLoc();
+				STOREF(0.0f, glob + op[i].c);
+			}
+			l2 = LocalLoc();
+			LocalJmpLoc(j1,l1);
+			LocalJmpLoc(j2,l2);
 			break;
 
-		case OP_BITOR:	//floats...
+		case OP_BITOR_F:	//floats...
 			//flds glob[A]
 			EmitByte(0xd9); EmitByte(0x05);EmitAdr(glob + op[i].a);
 			//flds glob[B]
 			EmitByte(0xd9); EmitByte(0x05);EmitAdr(glob + op[i].b);
 			//fistp tb
-			EmitByte(0xdf); EmitByte(0x1d);EmitAdr(&tb);
+			EmitByte(0xdb); EmitByte(0x1d);EmitAdr(&tb);
 			//fistp ta
-			EmitByte(0xdf); EmitByte(0x1d);EmitAdr(&ta);
-			//mov ta,%eax
-			EmitByte(0xa1); EmitAdr(&ta);
-			//and tb,%eax
+			EmitByte(0xdb); EmitByte(0x1d);EmitAdr(&ta);
+			LOADREG(&ta, REG_EAX)
+			//or %eax,tb
 			EmitByte(0x09); EmitByte(0x05);EmitAdr(&tb);
 			//fild tb
-			EmitByte(0xdf); EmitByte(0x05);EmitAdr(&tb);
+			EmitByte(0xdb); EmitByte(0x05);EmitAdr(&tb);
 			//fstps glob[C]
 			EmitByte(0xd9); EmitByte(0x1d);EmitAdr(glob + op[i].c);
 			break;
 
-		case OP_BITAND:
+		case OP_BITAND_F:
 			//flds glob[A]
 			EmitByte(0xd9); EmitByte(0x05);EmitAdr(glob + op[i].a);
 			//flds glob[B]
 			EmitByte(0xd9); EmitByte(0x05);EmitAdr(glob + op[i].b);
 			//fistp tb
-			EmitByte(0xdf); EmitByte(0x1d);EmitAdr(&tb);
+			EmitByte(0xdb); EmitByte(0x1d);EmitAdr(&tb);
 			//fistp ta
-			EmitByte(0xdf); EmitByte(0x1d);EmitAdr(&ta);
-			//mov ta,%eax
-			EmitByte(0xa1); EmitAdr(&ta);
+			EmitByte(0xdb); EmitByte(0x1d);EmitAdr(&ta);
+			/*two args are now at ta and tb*/
+			LOADREG(&ta, REG_EAX)
 			//and tb,%eax
 			EmitByte(0x21); EmitByte(0x05);EmitAdr(&tb);
+			/*we just wrote the int value to tb, convert that to a float and store it at c*/
 			//fild tb
-			EmitByte(0xdf); EmitByte(0x05);EmitAdr(&tb);
+			EmitByte(0xdb); EmitByte(0x05);EmitAdr(&tb);
 			//fstps glob[C]
 			EmitByte(0xd9); EmitByte(0x1d);EmitAdr(glob + op[i].c);
 			break;
 
-		case OP_AND:
+		case OP_AND_F:
 			//test floats properly, so we don't get confused with -0.0
 
 			//flds	glob[A]
@@ -612,7 +714,7 @@ EmitByte(0xcc);
 			EmitByte(0xdf); EmitByte(0xe0);
 			//test	$0x40,%ah
 			EmitByte(0xf6); EmitByte(0xc4);EmitByte(0x40);
-			//je onefalse
+			//jz onefalse
 			EmitByte(0x75); EmitByte(0x1f);
 
 			//flds	glob[B]
@@ -623,7 +725,7 @@ EmitByte(0xcc);
 			EmitByte(0xdf); EmitByte(0xe0);
 			//test	$0x40,%ah
 			EmitByte(0xf6); EmitByte(0xc4);EmitByte(0x40);
-			//jne onefalse
+			//jnz onefalse
 			EmitByte(0x75); EmitByte(0x0c);
 
 			//mov float0,glob[C]
@@ -636,7 +738,7 @@ EmitByte(0xcc);
 			EmitByte(0xc7); EmitByte(0x05); EmitAdr(glob + op[i].c); EmitFloat(0.0f);
 			//done:
 			break;
-		case OP_OR:
+		case OP_OR_F:
 			//test floats properly, so we don't get confused with -0.0
 
 			//flds	glob[A]
@@ -674,18 +776,16 @@ EmitByte(0xcc);
 
 		case OP_EQ_S:
 		case OP_NE_S:
+			{
 			//put a in ecx
+			LOADREG(glob + op[i].a, REG_ECX);
 			//put b in edi
-			//mov a,%ecx
-			EmitByte(0x8b); EmitByte(0x0d); EmitAdr(glob + op[i].a);
-			//mov b,%edi
-			EmitByte(0x8b); EmitByte(0x3d); EmitAdr(glob + op[i].b);
-
+			LOADREG(glob + op[i].b, REG_EDI);
+/*
 			//early out if they're equal
 			//cmp %ecx,%edi
-			EmitByte(0x39); EmitByte(0xd1);
-			//je _true
-			EmitByte(0x74); EmitByte(0x68);
+			EmitByte(0x39); EmitByte(0xc0 | (REG_EDI<<3) | REG_ECX);
+			j1c = LocalJmp(OP_EQ_S);
 
 			//if a is 0, check if b is ""
 			//jecxz ais0
@@ -707,31 +807,30 @@ EmitByte(0xcc);
 				EmitByte(0x83); EmitByte(0xc4); EmitByte(0x08);
 				//cmpb $0,(%eax)
 				EmitByte(0x80); EmitByte(0x38); EmitByte(0x00);
-				//je _true
-				EmitByte(0x74); EmitByte(0x4b);
-				//jmp _false
-				EmitByte(0xeb); EmitByte(0x3d);
+				j1b = LocalJmp(OP_EQ_S);
+				j0b = LocalJmp(OP_GOTO);
+			}
 
-  				//ais0:
-  				{
-					//push edi
-					EmitByte(0x57);
-					//push progfuncs
-					EmitByte(0x68); EmitAdr(progfuncs);
-					//call PR_StringToNative
-					EmitByte(0xe8); EmitFOffset(PR_StringToNative,4);
-					//add $8,%esp
-					EmitByte(0x83); EmitByte(0xc4); EmitByte(0x08);
-					//cmpb $0,(%eax)
-					EmitByte(0x80); EmitByte(0x38); EmitByte(0x00);
-					//je _true
-					EmitByte(0x74); EmitByte(0x36);
-					//jmp _false
-					EmitByte(0xeb); EmitByte(0x28);
-				}
+			//ais0:
+			{
+				//push edi
+				EmitByte(0x57);
+				//push progfuncs
+				EmitByte(0x68); EmitAdr(progfuncs);
+				//call PR_StringToNative
+				EmitByte(0xe8); EmitFOffset(PR_StringToNative,4);
+				//add $8,%esp
+				EmitByte(0x83); EmitByte(0xc4); EmitByte(0x08);
+				//cmpb $0,(%eax)
+				EmitByte(0x80); EmitByte(0x38); EmitByte(0x00);
+				//je _true
+				EmitByte(0x74); EmitByte(0x36);
+				//jmp _false
+				EmitByte(0xeb); EmitByte(0x28);
 			}
 			//bnot0:
-
+*/
+LOADREG(glob + op[i].a, REG_ECX);
 			//push ecx
 			EmitByte(0x51);
 			//push progfuncs
@@ -741,6 +840,7 @@ EmitByte(0xcc);
 			//push %eax
 			EmitByte(0x50);
 
+LOADREG(glob + op[i].b, REG_EDI);
 			//push %edi
 			EmitByte(0x57);
 			//push progfuncs
@@ -757,28 +857,35 @@ EmitByte(0xcc);
 			EmitByte(0xe8); EmitFOffset(strcmp,4);
 			//add $16,%esp
 			EmitByte(0x83); EmitByte(0xc4); EmitByte(0x10);
+
 			//cmp $0,%eax
 			EmitByte(0x83); EmitByte(0xf8); EmitByte(0x00);
-			//je _true
-			EmitByte(0x74); EmitByte(0x0c);
-//_false:
-			//mov 0.0f,c
-			EmitByte(0xc7); EmitByte(0x05); EmitAdr(glob + op[i].c); EmitFloat((op[i].op == OP_NE_S)?1.0f:0.0f);
-			//jmp done
-			EmitByte(0xeb); EmitByte(0x0a);
-//_true:
-			//mov 1.0f,c
-			EmitByte(0xc7); EmitByte(0x05); EmitAdr(glob + op[i].c); EmitFloat((op[i].op == OP_NE_S)?0.0f:1.0f);
-//_done:
+			j1 = LocalJmp(OP_EQ_S);
+			{
+				l0 = LocalLoc();
+				STOREF((op[i].op == OP_NE_S)?1.0f:0.0f, glob + op[i].c);
+				j2 = LocalJmp(OP_GOTO);
+			}
+			{
+				l1 = LocalLoc();
+				STOREF((op[i].op == OP_NE_S)?0.0f:1.0f, glob + op[i].c);
+			}
+			l2 = LocalLoc();
+
+//			LocalJmpLoc(j0b, l0);
+			LocalJmpLoc(j1, l1);
+//			LocalJmpLoc(j1b, l1);
+			LocalJmpLoc(j2, l2);
+			}
 			break;
 
 		case OP_NOT_S:
-			//mov A,%eax
-			EmitByte(0xa1);EmitAdr(glob + op[i].a);
+			LOADREG(glob + op[i].a, REG_EAX)
+
 			//cmp $0,%eax
 			EmitByte(0x83); EmitByte(0xf8); EmitByte(0x00);
-			//je _true
-			EmitByte(0x74); EmitByte(0x1f);
+			j2 = LocalJmp(OP_EQ_S);
+
 			//push %eax
 			EmitByte(0x50);
 			//push progfuncs
@@ -787,19 +894,22 @@ EmitByte(0xcc);
 			EmitByte(0xe8); EmitFOffset(PR_StringToNative,4);
 			//add $8,%esp
 			EmitByte(0x83); EmitByte(0xc4); EmitByte(0x08);
+
 			//cmpb $0,(%eax)
 			EmitByte(0x80); EmitByte(0x38); EmitByte(0x00);
-			//je _true
-			EmitByte(0x74); EmitByte(0x0c);
-//_false:
-			//mov 0.0f,c
-			EmitByte(0xc7); EmitByte(0x05); EmitAdr(glob + op[i].c); EmitFloat(0.0f);
-			//jmp done
-			EmitByte(0xeb); EmitByte(0x0a);
-//_true:
-			//mov 1.0f,c
-			EmitByte(0xc7); EmitByte(0x05); EmitAdr(glob + op[i].c); EmitFloat(1.0f);
-//_done:
+			j1 = LocalJmp(OP_EQ_S);
+			{
+				STOREF(0.0f, glob + op[i].c);
+				j0 = LocalJmp(OP_GOTO);
+			}
+			{
+				l1 = LocalLoc();
+				STOREF(1.0f, glob + op[i].c);
+			}
+			l2 = LocalLoc();
+			LocalJmpLoc(j2, l1);
+			LocalJmpLoc(j1, l1);
+			LocalJmpLoc(j0, l2);
 			break;
 
 		case OP_ADD_V:
@@ -875,42 +985,31 @@ EmitByte(0xcc);
 
 		case OP_EQ_F:
 		case OP_NE_F:
-		case OP_LE:
-		case OP_GE:
-		case OP_LT:
-		case OP_GT:
+		case OP_LE_F:
+		case OP_GE_F:
+		case OP_LT_F:
+		case OP_GT_F:
 			//flds glob[A]
-			EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + op[i].a);
-			//flds glob[B]
 			EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + op[i].b);
+			//flds glob[B]
+			EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + op[i].a);
 			//fcomip %st(1),%st
 			EmitByte(0xdf);EmitByte(0xe9);
 			//fstp %st(0)	(aka: pop)
 			EmitByte(0xdd);EmitByte(0xd8);
 
-			//jcc _true
-			if (op[i].op == OP_LE)
-				EmitByte(0x7e);	//jle
-			else if (op[i].op == OP_GE)
-				EmitByte(0x7d);	//jge
-			else if (op[i].op == OP_LT)
-				EmitByte(0x7c);	//jl
-			else if (op[i].op == OP_GT)
-				EmitByte(0x7f);	//jg
-			else if (op[i].op == OP_NE_F)
-				EmitByte(0x75);	//jne
-			else
-				EmitByte(0x74);	//je
-			EmitByte(0x0c);
-//_false:
-			//mov 0.0f,c
-			EmitByte(0xc7); EmitByte(0x05); EmitAdr(glob + op[i].c); EmitFloat(0.0f);
-			//jmp done
-			EmitByte(0xeb); EmitByte(0x0a);
-//_true:
-			//mov 1.0f,c
-			EmitByte(0xc7); EmitByte(0x05); EmitAdr(glob + op[i].c); EmitFloat(1.0f);
-//_done:
+			j1 = LocalJmp(op[i].op);
+			{
+				STOREF(0.0f, glob + op[i].c);
+				j2 = LocalJmp(OP_GOTO);
+			}
+			{
+				l1 = LocalLoc();
+				STOREF(1.0f, glob + op[i].c);
+			}
+			l2 = LocalLoc();
+			LocalJmpLoc(j1,l1);
+			LocalJmpLoc(j2,l2);
 			break;
 
 		case OP_MUL_FV:
@@ -934,21 +1033,21 @@ EmitByte(0xcc);
 				EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + f);
 
 				//flds glob[V0]
-				EmitByte(0xd8);EmitByte(0x0d);EmitAdr(glob + v+0);
+				EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + v+0);
 				//fmul st(1)
 				EmitByte(0xd8);EmitByte(0xc9);
 				//fstps glob[C]
 				EmitByte(0xd9);EmitByte(0x1d);EmitAdr(glob + op[i].c+0);
 
 				//flds glob[V0]
-				EmitByte(0xd8);EmitByte(0x0d);EmitAdr(glob + v+1);
+				EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + v+1);
 				//fmul st(1)
 				EmitByte(0xd8);EmitByte(0xc9);
 				//fstps glob[C]
 				EmitByte(0xd9);EmitByte(0x1d);EmitAdr(glob + op[i].c+1);
 
 				//flds glob[V0]
-				EmitByte(0xd8);EmitByte(0x0d);EmitAdr(glob + v+2);
+				EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + v+2);
 				//fmul st(1)
 				EmitByte(0xd8);EmitByte(0xc9);
 				//fstps glob[C]
@@ -972,8 +1071,8 @@ EmitByte(0xcc);
 			//add $12,%esp
 			EmitByte(0x83); EmitByte(0xc4); EmitByte(0x0c);
 			break;
-#if 0
-		case OP_NOT_V:
+#if 1
+/*		case OP_NOT_V:
 			//flds 0
 			//flds glob[A+0]
 			//fcomip %st(1),%st
@@ -990,8 +1089,18 @@ EmitByte(0xcc);
 			//mov 0,C
 			//done:
 			break;
-
+*/
+			
+		case OP_NOT_V:
+			EmitByte(0xcd);EmitByte(op[i].op);
+			printf("QCJIT: instruction %i is not implemented\n", op[i].op);
+			break;
+#endif
+		case OP_NE_V:
 		case OP_EQ_V:
+		{
+			void *f0, *f1, *f2, *floc;
+//compare v[0]
 			//flds glob[A]
 			EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + op[i].a+0);
 			//flds glob[B]
@@ -1001,54 +1110,151 @@ EmitByte(0xcc);
 			//fstp %st(0)	(aka: pop)
 			EmitByte(0xdd);EmitByte(0xd8);
 
-			//jncc _true
-			if (op[i].op == OP_NE_V)
-				EmitByte(0x74);	//je
-			else
-				EmitByte(0x75);	//jne
-			EmitByte(0x0c);
-//_false0:
-			//mov 0.0f,c
-			EmitByte(0xc7); EmitByte(0x05); EmitAdr(glob + op[i].c); EmitFloat(1.0f);
-			//jmp done
-			EmitByte(0xeb); EmitByte(0x0a);
+			/*if the condition is true, don't fail*/
+			j1 = LocalJmp(op[i].op);
+			{
+				STOREF(0.0f, glob + op[i].c);
+				f0 = LocalJmp(OP_GOTO);
+			}
+			l1 = LocalLoc();
+			LocalJmpLoc(j1,l1);
 
+//compare v[1]
+			//flds glob[A]
+			EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + op[i].a+1);
+			//flds glob[B]
+			EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + op[i].b+1);
+			//fcomip %st(1),%st
+			EmitByte(0xdf);EmitByte(0xe9);
+			//fstp %st(0)	(aka: pop)
+			EmitByte(0xdd);EmitByte(0xd8);
 
-//_true:
-			//mov 1.0f,c
-			EmitByte(0xc7); EmitByte(0x05); EmitAdr(glob + op[i].c); EmitFloat(0.0f);
-//_done:
+			/*if the condition is true, don't fail*/
+			j1 = LocalJmp(op[i].op);
+			{
+				STOREF(0.0f, glob + op[i].c);
+				f1 = LocalJmp(OP_GOTO);
+			}
+			l1 = LocalLoc();
+			LocalJmpLoc(j1,l1);
+
+//compare v[2]
+			//flds glob[A]
+			EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + op[i].a+2);
+			//flds glob[B]
+			EmitByte(0xd9);EmitByte(0x05);EmitAdr(glob + op[i].b+2);
+			//fcomip %st(1),%st
+			EmitByte(0xdf);EmitByte(0xe9);
+			//fstp %st(0)	(aka: pop)
+			EmitByte(0xdd);EmitByte(0xd8);
+
+			/*if the condition is true, don't fail*/
+			j1 = LocalJmp(op[i].op);
+			{
+				STOREF(0.0f, glob + op[i].c);
+				f2 = LocalJmp(OP_GOTO);
+			}
+			l1 = LocalLoc();
+			LocalJmpLoc(j1,l1);
+
+//success!
+			STOREF(1.0f, glob + op[i].c);
+
+			floc = LocalLoc();
+			LocalJmpLoc(f0,floc);
+			LocalJmpLoc(f1,floc);
+			LocalJmpLoc(f2,floc);
+			break;
+		}
+
+		/*fteqcc generates these from reading 'fast arrays', and are part of hexenc extras*/
+		case OP_FETCH_GBL_F:
+		case OP_FETCH_GBL_S:
+		case OP_FETCH_GBL_E:
+		case OP_FETCH_GBL_FNC:
+		case OP_FETCH_GBL_V:
+		{
+			unsigned int max = ((unsigned int*)glob)[op[i].a-1];
+			unsigned int base = op[i].a;
+			//flds glob[B]
+			EmitByte(0xd9); EmitByte(0x05);EmitAdr(glob + op[i].b);
+			//fistp ta
+			EmitByte(0xdb); EmitByte(0x1d);EmitAdr(&ta);
+			LOADREG(&ta, REG_EAX)
+			//FIXME: if eax >= $max, abort
+
+			if (op[i].op == OP_FETCH_GBL_V)
+			{
+				/*scale the index by 3*/
+				SETREGI(3, REG_EDX)
+				//mul %edx
+				EmitByte(0xf7); EmitByte(0xe2);
+			}
+
+			//lookup global
+			//mov &glob[base](,%eax,4),%edx
+			EmitByte(0x8b);EmitByte(0x14);EmitByte(0x85);Emit4Byte((unsigned int)(glob + base+0));
+			STOREREG(REG_EDX, glob + op[i].c+0)
+			if (op[i].op == OP_FETCH_GBL_V)
+			{
+				//mov &glob[base+1](,%eax,4),%edx
+				EmitByte(0x8b);EmitByte(0x14);EmitByte(0x85);Emit4Byte((unsigned int)(glob + base+1));
+				STOREREG(REG_EDX, glob + op[i].c+1)
+				//mov &glob[base+2](,%eax,4),%edx
+				EmitByte(0x8b);EmitByte(0x14);EmitByte(0x85);Emit4Byte((unsigned int)(glob + base+2));
+				STOREREG(REG_EDX, glob + op[i].c+2)
+			}
+			break;
+		}
+
+		/*fteqcc generates these from writing 'fast arrays'*/
+		case OP_GLOBALADDRESS:
+			LOADREG(glob + op[i].b, REG_EAX);
+			//lea &glob[A](, %eax, 4),%eax
+			EmitByte(0x8d);EmitByte(0x04);EmitByte(0x85);EmitAdr(glob + op[i].b+2);
+			STOREREG(REG_EAX, glob + op[i].c);
+			break;
+//		case OP_BOUNDCHECK:
+			//FIXME: assert b <= a < c
+			break;
+		case OP_CONV_FTOI:
+			//flds glob[A]
+			EmitByte(0xd9); EmitByte(0x05);EmitAdr(glob + op[i].a);
+			//fistp glob[C]
+			EmitByte(0xdb); EmitByte(0x1d);EmitAdr(glob + op[i].c);
+			break;
+		case OP_MUL_I:
+			LOADREG(glob + op[i].a, REG_EAX);
+			//mull glob[C]       (arg*eax => edx:eax)
+			EmitByte(0xfc); EmitByte(0x25);EmitAdr(glob + op[i].b);
+			STOREREG(REG_EAX, glob + op[i].c);
+			break;
+
+		/*other extended opcodes*/
+		case OP_BITOR_I:
+			LOADREG(glob + op[i].a, REG_EAX)
+			//or %eax,tb
+			EmitByte(0x0b); EmitByte(0x05);EmitAdr(glob + op[i].b);
+			STOREREG(REG_EAX, glob + op[i].c);
 			break;
 
 
-		case OP_EQ_V:
-			EmitByte(0xcd);EmitByte(op[i].op);
-			printf("QCJIT: instruction %i is not implemented\n", op[i].op);
-			break;
-
-		case OP_NE_V:
-			EmitByte(0xcd);EmitByte(op[i].op);
-			printf("QCJIT: instruction %i is not implemented\n", op[i].op);
-			break;
-
-		case OP_NOT_V:
-			EmitByte(0xcd);EmitByte(op[i].op);
-			printf("QCJIT: instruction %i is not implemented\n", op[i].op);
-			break;
-#endif
 		default:
-			printf("QCJIT: Extended instruction set %i is not supported, not using jit.\n", op[i].op);
+			{
+				enum qcop_e e = op[i].op;
+			printf("QCJIT: Extended instruction set %i is not supported, not using jit.\n", e);
+			}
 
 
-			free(statementjumps);	//[MAX_STATEMENTS]
-			free(statementoffsets); //[MAX_STATEMENTS]
-			free(code);
-			statementoffsets = NULL;
-			return false;
+			free(jit->statementjumps);	//[MAX_STATEMENTS]
+			free(jit->statementoffsets); //[MAX_STATEMENTS]
+			free(jit->code);
+			free(jit);
+			return NULL;
 		}
 	}
 
-	FixupJumps();
+	FixupJumps(jit);
 
 #ifdef _WIN32
 	{
@@ -1056,22 +1262,32 @@ EmitByte(0xcc);
 
 		//this memory is on the heap.
 		//this means that we must maintain read/write protection, or libc will crash us
-		VirtualProtect(code, codesize, PAGE_EXECUTE_READWRITE, &old);
+		VirtualProtect(jit->code, jit->codesize, PAGE_EXECUTE_READWRITE, &old);
 	}
 #endif
 
-//	externs->WriteFile("jit.x86", code, codesize);
+//	externs->WriteFile("jit.x86", jit->code, jit->codesize);
 
-	return true;
+	return jit;
 }
 
-void PR_EnterJIT(progfuncs_t *progfuncs, int statement)
+float foo(float arg)
+{
+	float f;
+	if (!arg)
+		f = 1;
+	else
+		f = 0;
+	return f;
+}
+
+void PR_EnterJIT(progfuncs_t *progfuncs, struct jitstate *jit, int statement)
 {
 #ifdef __GNUC__
 	//call, it clobbers pretty much everything.
-	asm("call *%0" :: "r"(statementoffsets[statement+1]),"b"(prinst->edicttable):"cc","memory","eax","ecx","edx");
+	asm("call *%0" :: "r"(jit->statementoffsets[statement+1]),"b"(prinst->edicttable):"cc","memory","eax","ecx","edx");
 #elif defined(_MSC_VER)
-	void *entry = statementoffsets[statement+1];
+	void *entry = jit->statementoffsets[statement+1];
 	void *edicttable = prinst->edicttable;
 	__asm {
 		pushad
