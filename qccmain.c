@@ -241,7 +241,7 @@ compiler_flag_t compiler_flag[] = {
 	{&flag_filetimes,		0,				"filetimes",	"Check Filetimes",		"Recompiles the progs only if the file times are modified."},
 	{&flag_fasttrackarrays,	FLAG_MIDCOMPILE|FLAG_ASDEFAULT,"fastarrays","fast arrays where possible",	"Generates extra instructions inside array handling functions to detect engine and use extension opcodes only in supporting engines.\nAdds a global which is set by the engine if the engine supports the extra opcodes. Note that this applies to all arrays or none."},
 	{&flag_assume_integer,	FLAG_MIDCOMPILE,"assumeint",	"Assume Integers",		"Numerical constants are assumed to be integers, instead of floats."},
-	{&pr_subscopedlocals,	FLAG_MIDCOMPILE,"subscope",	"Subscoped locals",		"Allow locals to only be valid in the block they are defined in (like in C)."},
+	{&pr_subscopedlocals,		FLAG_MIDCOMPILE,		"subscope",	"Subscoped Locals",		"Restrict the scope of locals to the block they are actually defined within, as in C."},
 	{NULL}
 };
 
@@ -2998,7 +2998,7 @@ void QCC_main (int argc, char **argv)	//as part of the quake engine
 	Hash_InitTable(&stringconstdefstable_dotranslate, MAX_REGS, qccHunkAlloc(Hash_BytesForBuckets(MAX_REGS)));
 	dotranslate=0;
 	dotranslate_count=0;
-	
+
 //	pr_global_defs = (QCC_def_t **)qccHunkAlloc(sizeof(QCC_def_t *) * MAX_REGS);
 
 	qcc_globals = (void *)qccHunkAlloc(sizeof(QCC_ddef_t) * MAX_GLOBALS);
