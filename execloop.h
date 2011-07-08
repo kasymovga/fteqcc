@@ -49,11 +49,11 @@ cont:	//last statement may have been a breakpoint
 	st = pr_statements + s;
 
 reeval:
+	switch (st->op & ~0x8000)
 #else
 	st++;
-#endif
-
 	switch (st->op)
+#endif
 	{
 	case OP_ADD_F:
 		OPC->_float = OPA->_float + OPB->_float;
@@ -101,16 +101,16 @@ reeval:
 		OPC->_vector[2] = OPB->_float / OPA->_vector[2];
 		break;
 
-	case OP_BITAND:
+	case OP_BITAND_F:
 		OPC->_float = (float)((int)OPA->_float & (int)OPB->_float);
 		break;
 
-	case OP_BITOR:
+	case OP_BITOR_F:
 		OPC->_float = (float)((int)OPA->_float | (int)OPB->_float);
 		break;
 
 
-	case OP_GE:
+	case OP_GE_F:
 		OPC->_float = (float)(OPA->_float >= OPB->_float);
 		break;
 	case OP_GE_I:
@@ -123,7 +123,7 @@ reeval:
 		OPC->_float = (float)(OPA->_float >= OPB->_int);
 		break;
 
-	case OP_LE:
+	case OP_LE_F:
 		OPC->_float = (float)(OPA->_float <= OPB->_float);
 		break;
 	case OP_LE_I:
@@ -136,7 +136,7 @@ reeval:
 		OPC->_float = (float)(OPA->_float <= OPB->_int);
 		break;
 
-	case OP_GT:
+	case OP_GT_F:
 		OPC->_float = (float)(OPA->_float > OPB->_float);
 		break;
 	case OP_GT_I:
@@ -149,7 +149,7 @@ reeval:
 		OPC->_float = (float)(OPA->_float > OPB->_int);
 		break;
 
-	case OP_LT:
+	case OP_LT_F:
 		OPC->_float = (float)(OPA->_float < OPB->_float);
 		break;
 	case OP_LT_I:
@@ -162,10 +162,10 @@ reeval:
 		OPC->_float = (float)(OPA->_float < OPB->_int);
 		break;
 
-	case OP_AND:
+	case OP_AND_F:
 		OPC->_float = (float)(OPA->_float && OPB->_float);
 		break;
-	case OP_OR:
+	case OP_OR_F:
 		OPC->_float = (float)(OPA->_float || OPB->_float);
 		break;
 
@@ -511,7 +511,7 @@ reeval:
 			st += (sofs)st->b - 1;	// offset the s++
 		break;
 
-	case OP_IFNOT:
+	case OP_IFNOT_I:
 		RUNAWAYCHECK();
 		if (!OPA->_int)
 			st += (sofs)st->b - 1;	// offset the s++
@@ -529,7 +529,7 @@ reeval:
 			st += (sofs)st->b - 1;	// offset the s++
 		break;
 
-	case OP_IF:
+	case OP_IF_I:
 		RUNAWAYCHECK();
 		if (OPA->_int)
 			st += (sofs)st->b - 1;	// offset the s++
@@ -575,8 +575,7 @@ reeval:
 		fnum = OPA->function;
 		if ((fnum & ~0xff000000)==0)
 		{
-			pr_trace++;
-			printf("NULL function from qc (%s).\n", progfuncs->stringtable + pr_xfunction->s_name);
+			PR_RunError(progfuncs, "NULL function from qc (%s).\n", progfuncs->stringtable + pr_xfunction->s_name);
 #ifndef DEBUGABLE
 			goto cont;
 #endif
@@ -742,7 +741,7 @@ if (pr_typecurrent != 0)
 		break;
 	
 
-	//array/structure reading/riting.
+	//array/structure reading/writing.
 	case OP_GLOBALADDRESS:
 		OPC->_int = ENGINEPOINTER(&OPA->_int + OPB->_int);
 		break;
@@ -825,8 +824,7 @@ if (pr_typecurrent != 0)
 		{
 			PR_RunError(progfuncs, "array index out of bounds: %s[%d]", PR_GlobalStringNoContents(progfuncs, st->a), i);
 		}
-		t = (eval_t *)&pr_globals[(uofs)st->a
-			+((int)OPB->_float)*3];
+		t = (eval_t *)&pr_globals[(uofs)st->a + i*3];
 		OPC->_vector[0] = t->_vector[0];
 		OPC->_vector[1] = t->_vector[1];
 		OPC->_vector[2] = t->_vector[2];
@@ -1109,14 +1107,6 @@ if (pr_typecurrent != 0)
 			s = ShowStep(progfuncs, s);
 			st = &pr_statements[s];	//let the user move execution
 			pr_xstatement = s = st-pr_statements;
-
-#if 0	//fakeop stuff - not practical, the rest of the code is more optimised, st needs to point at the correct statement
-			memcpy(&fakeop, st, sizeof(dstatement_t));	//don't hit the new statement as a break point, cos it's probably the same one.
-			fakeop.op &= ~0x8000;
-			st = &fakeop;	//a little remapping...
-#else
-			st->op &= ~0x8000;	//just remove the breakpoint and go around again, but this time in the debugger.
-#endif
 
 			goto reeval;	//reexecute
 		}
