@@ -2460,20 +2460,15 @@ QCC_def_t *QCC_PR_Statement ( QCC_opcode_t *op, QCC_def_t *var_a, QCC_def_t *var
 			default:	//no way will this be hit...
 				QCC_PR_ParseError(ERR_INTERNAL, "opcode invalid 3 times %i", op - pr_opcodes);
 			}
-			statement->a = var_a ? var_a->ofs : 0;
-			statement->b = var_c ? var_c->ofs : 0;
-			QCC_FreeTemp(var_c);
-			var_c = QCC_GetTemp(*op->type_c);
-			statement->c = var_c ? var_c->ofs : 0;
 
+			statement->a = var_c ? var_c->ofs : 0;
+			statement->b = var_a ? var_a->ofs : 0;
+			statement->c = var_c->ofs;
 			var_b = var_b;	//this is the ptr.
 			QCC_FreeTemp(var_a);
 			var_a = var_c;	//this is the value.
+
 			op = &pr_opcodes[OP_STOREP_V];
-
-
-
-
 			QCC_FreeTemp(var_c);
 			var_c = NULL;
 			QCC_FreeTemp(var_b);
