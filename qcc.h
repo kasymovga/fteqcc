@@ -341,6 +341,7 @@ typedef struct QCC_def_s
 	int s_line;
 
 	int arraysize;
+	int numdefs; // number of defs this one starts
 	pbool shared;
 	pbool saved;
 	pbool isstatic;

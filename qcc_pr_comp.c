@@ -7736,7 +7736,7 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 	char array[64];
 	char newname[256];
 	int a;
-	QCC_def_t *def, *first=NULL;
+	QCC_def_t *def, *first=NULL, *d;
 
 #define KEYWORD(x) if (!STRCMP(name, #x) && keyword_##x) {if (keyword_##x)QCC_PR_ParseWarning(WARN_KEYWORDDISABLED, "\""#x"\" keyword used as variable name%s", keywords_coexist?" - coexisting":" - disabling");keyword_##x=keywords_coexist;}
 	if (name)
@@ -7798,6 +7798,7 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 
 		def->scope = scope;
 		def->saved = saved;
+		def->numdefs = 1;
 
 	//	if (arraysize>1)
 			def->constant = true;
@@ -7821,14 +7822,20 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 				{
 				case ev_vector:
 					sprintf(newname, "%s%s.%s", name, array, parttype->name);
-					QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, saved);
+					d = QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, saved);
+					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
 
 					sprintf(newname, "%s%s.%s_x", name, array, parttype->name);
-					QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, false);
+					d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, false);
+					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+
 					sprintf(newname, "%s%s.%s_y", name, array, parttype->name);
-					QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs+1, false, false);
+					d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs+1, false, false);
+					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+
 					sprintf(newname, "%s%s.%s_z", name, array, parttype->name);
-					QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs+2, false, false);
+					d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs+2, false, false);
+					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
 					break;
 
 				case ev_float:
@@ -7841,12 +7848,15 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 				case ev_union:
 				case ev_variant:	//for lack of any better alternative
 					sprintf(newname, "%s%s.%s", name, array, parttype->name);
-					QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, saved);
+					d = QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, saved);
+					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
 					break;
 
 				case ev_function:
 					sprintf(newname, "%s%s.%s", name, array, parttype->name);
-					QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a +parttype->ofs, false, saved)->initialized = true;
+					d = QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a +parttype->ofs, false, saved);
+					d->initialized = true;
+					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
 					break;
 				case ev_void:
 					break;
@@ -7857,11 +7867,16 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 		else if (type->type == ev_vector)
 		{	//do the vector thing.
 			sprintf(newname, "%s%s_x", name, array);
-			QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+0, referable, false);
+			d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+0, referable, false);
+			def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+
 			sprintf(newname, "%s%s_y", name, array);
-			QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+1, referable, false);
+			d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+1, referable, false);
+			def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+
 			sprintf(newname, "%s%s_z", name, array);
-			QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+2, referable, false);
+			d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+2, referable, false);
+			def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
 		}
 		else if (type->type == ev_field)
 		{
@@ -7869,11 +7884,16 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 			{
 				//do the vector thing.
 				sprintf(newname, "%s%s_x", name, array);
-				QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+0, referable, false);
+				d = QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+0, referable, false);
+				def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+
 				sprintf(newname, "%s%s_y", name, array);
-				QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+1, referable, false);
+				d = QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+1, referable, false);
+				def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+
 				sprintf(newname, "%s%s_z", name, array);
-				QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+2, referable, false);
+				d = QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+2, referable, false);
+				def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
 			}
 		}
 	}
@@ -8412,7 +8432,7 @@ void QCC_PR_ParseDefs (char *classname)
 {
 	char		*name;
 	QCC_type_t		*type, *parm;
-	QCC_def_t		*def, *d;
+	QCC_def_t		*def, *lastdef, *d;
 	QCC_function_t	*f;
 	QCC_dfunction_t	*df;
 	int			i = 0; // warning: ‘i’ may be used uninitialized in this function
@@ -9161,6 +9181,9 @@ void QCC_PR_ParseDefs (char *classname)
 			}
 			else
 				def->constant = isconstant;
+
+			for(arraysize = 1, d = def->next; arraysize < def->numdefs; ++arraysize, d = d->next)
+				d->constant = def->constant;
 		}
 
 
