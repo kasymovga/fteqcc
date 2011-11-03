@@ -8407,6 +8407,7 @@ void QCC_PR_ParseInitializerType(int arraysize, QCC_def_t *def, QCC_type_t *type
 					i++;
 				}
 			}
+			tmp->references++;
 		}
 		QCC_FreeTemp(tmp);
 	}
