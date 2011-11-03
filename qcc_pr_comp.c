@@ -1515,16 +1515,16 @@ static void QCC_fprintfLocals(FILE *f, gofs_t paramstart, gofs_t paramend)
 		if (var->ofs >= paramstart && var->ofs < paramend)
 			continue;
 		if (var->arraysize != 1)
-			fprintf(f, "local %s %s[%i];\n", TypeName(var->type), var->name, var->arraysize);
+			fprintf(f, "local %s %s[%i]; /* at %d */\n", TypeName(var->type), var->name, var->arraysize, var->ofs);
 		else
-			fprintf(f, "local %s %s;\n", TypeName(var->type), var->name);
+			fprintf(f, "local %s %s; /* at %d */\n", TypeName(var->type), var->name, var->ofs);
 	}
 
 	for (t = functemps, i = 0; t; t = t->next, i++)
 	{
 		if (t->lastfunc == pr_scope)
 		{
-			fprintf(f, "local %s temp_%i;\n", (t->size == 1)?"float":"vector", i);
+			fprintf(f, "local %s temp_%i; /* at %d */\n", (t->size == 1)?"float":"vector", i, t->ofs);
 		}
 	}
 }
@@ -7072,9 +7072,9 @@ void QCC_WriteAsmFunction(QCC_def_t	*sc, unsigned int firststatement, gofs_t fir
 				break;
 		}
 		if (param)
-			fprintf(asmfile, "%s %s", TypeName(type), param->name);
+			fprintf(asmfile, "%s %s /* at %d */", TypeName(type), param->name, o);
 		else
-			fprintf(asmfile, "%s", TypeName(type));
+			fprintf(asmfile, "%s /* at %d */", TypeName(type), o);
 
 		o += type->size;
 	}
@@ -7890,7 +7890,7 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 			pHash_Add(&globalstable, first->name, first, qccHunkAlloc(sizeof(bucket_t)));
 
 		if (!scope && asmfile)
-			fprintf(asmfile, "%s %s;\n", TypeName(first->type), first->name);
+			fprintf(asmfile, "%s %s; /* at %d */\n", TypeName(first->type), first->name, first->ofs);
 	}
 
 	return first;
@@ -8387,6 +8387,7 @@ void QCC_PR_ParseInitializerType(int arraysize, QCC_def_t *def, QCC_type_t *type
 					i++;
 				}
 			}
+			tmp->references++;
 		}
 		QCC_FreeTemp(tmp);
 	}
