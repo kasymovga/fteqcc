@@ -7753,7 +7753,7 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 	char array[64];
 	char newname[256];
 	int a;
-	QCC_def_t *def, *first=NULL, *d;
+	QCC_def_t *def, *first=NULL;
 
 #define KEYWORD(x) if (!STRCMP(name, #x) && keyword_##x) {if (keyword_##x)QCC_PR_ParseWarning(WARN_KEYWORDDISABLED, "\""#x"\" keyword used as variable name%s", keywords_coexist?" - coexisting":" - disabling");keyword_##x=keywords_coexist;}
 	if (name)
@@ -7815,7 +7815,6 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 
 		def->scope = scope;
 		def->saved = saved;
-		def->numdefs = 1;
 
 		//if (type->type = ev_field)
 			def->constant = true;
@@ -7839,20 +7838,14 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 				{
 				case ev_vector:
 					sprintf(newname, "%s%s.%s", name, array, parttype->name);
-					d = QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, saved);
-					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+					QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, saved);
 
 					sprintf(newname, "%s%s.%s_x", name, array, parttype->name);
-					d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, false);
-					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
-
+					QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, false);
 					sprintf(newname, "%s%s.%s_y", name, array, parttype->name);
-					d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs+1, false, false);
-					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
-
+					QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs+1, false, false);
 					sprintf(newname, "%s%s.%s_z", name, array, parttype->name);
-					d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs+2, false, false);
-					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+					QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a + parttype->ofs+2, false, false);
 					break;
 
 				case ev_float:
@@ -7865,15 +7858,12 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 				case ev_union:
 				case ev_variant:	//for lack of any better alternative
 					sprintf(newname, "%s%s.%s", name, array, parttype->name);
-					d = QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, saved);
-					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+					QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a + parttype->ofs, false, saved);
 					break;
 
 				case ev_function:
 					sprintf(newname, "%s%s.%s", name, array, parttype->name);
-					d = QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a +parttype->ofs, false, saved);
-					d->initialized = true;
-					def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+					QCC_PR_DummyDef(parttype, newname, scope, 1, ofs + type->size*a +parttype->ofs, false, saved)->initialized = true;
 					break;
 				case ev_void:
 					break;
@@ -7884,16 +7874,11 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 		else if (type->type == ev_vector)
 		{	//do the vector thing.
 			sprintf(newname, "%s%s_x", name, array);
-			d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+0, referable, false);
-			def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
-
+			QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+0, referable, false);
 			sprintf(newname, "%s%s_y", name, array);
-			d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+1, referable, false);
-			def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
-
+			QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+1, referable, false);
 			sprintf(newname, "%s%s_z", name, array);
-			d = QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+2, referable, false);
-			def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+			QCC_PR_DummyDef(type_float, newname, scope, 1, ofs + type->size*a+2, referable, false);
 		}
 		else if (type->type == ev_field)
 		{
@@ -7901,16 +7886,11 @@ QCC_def_t *QCC_PR_DummyDef(QCC_type_t *type, char *name, QCC_def_t *scope, int a
 			{
 				//do the vector thing.
 				sprintf(newname, "%s%s_x", name, array);
-				d = QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+0, referable, false);
-				def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
-
+				QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+0, referable, false);
 				sprintf(newname, "%s%s_y", name, array);
-				d = QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+1, referable, false);
-				def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
-
+				QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+1, referable, false);
 				sprintf(newname, "%s%s_z", name, array);
-				d = QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+2, referable, false);
-				def->numdefs += d->numdefs; if(def != first) first->numdefs += d->numdefs;
+				QCC_PR_DummyDef(type_floatfield, newname, scope, 1, ofs + type->size*a+2, referable, false);
 			}
 		}
 		first->deftail = pr.def_tail;
@@ -8464,7 +8444,6 @@ void QCC_PR_ParseInitializerType(int arraysize, QCC_def_t *def, QCC_type_t *type
 					i++;
 				}
 			}
-			tmp->references++;
 		}
 		QCC_FreeTemp(tmp);
 	}
@@ -8490,7 +8469,7 @@ void QCC_PR_ParseDefs (char *classname)
 {
 	char		*name;
 	QCC_type_t		*type, *parm;
-	QCC_def_t		*def, *lastdef, *d;
+	QCC_def_t		*def, *d;
 	QCC_function_t	*f;
 	QCC_dfunction_t	*df;
 	int			i = 0; // warning: ‘i’ may be used uninitialized in this function
@@ -9208,9 +9187,6 @@ void QCC_PR_ParseDefs (char *classname)
 			}
 			else
 				def->constant = isconstant;
-
-			for(arraysize = 1, d = def->next; arraysize < def->numdefs; ++arraysize, d = d->next)
-				d->constant = def->constant;
 		}
 
 		d = def;
