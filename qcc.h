@@ -872,7 +872,7 @@ extern PATHSTRING		*precache_files;
 extern int			*precache_files_block;
 extern int			numfiles;
 
-extern int	QCC_CopyString (char *str);
+int	QCC_CopyString (char *str);
 
 
 
