@@ -10,24 +10,6 @@
 extern jmp_buf qcccompileerror;
 #endif
 
-// I put the following here to resolve "undefined reference to `__imp__vsnprintf'" with MinGW64 ~ Moodles
-#ifdef __MINGW64__
-#ifndef QCCONLY
-	#if (_MSC_VER >= 1400)
-		//with MSVC 8, use MS extensions
-		#define snprintf linuxlike_snprintf_vc8
-		int VARGS linuxlike_snprintf_vc8(char *buffer, int size, const char *format, ...) LIKEPRINTF(3);
-		#define vsnprintf(a, b, c, d) vsnprintf_s(a, b, _TRUNCATE, c, d)
-	#else
-		//msvc crap
-		#define snprintf linuxlike_snprintf
-		int VARGS linuxlike_snprintf(char *buffer, int size, const char *format, ...) LIKEPRINTF(3);
-		#define vsnprintf linuxlike_vsnprintf
-		int VARGS linuxlike_vsnprintf(char *buffer, int size, const char *format, va_list argptr);
-	#endif
-#endif
-#endif
-
 // set these before calling CheckParm
 int myargc;
 char **myargv;
@@ -44,7 +26,7 @@ const unsigned int		type_size[12] = {1,	//void
 						sizeof(func_t)/4,//function
 						1,  //pointer (its an int index)
 						1,	//integer
-						1,	//fixme: how big should a variant be?
+						3,	//fixme: how big should a variant be?
 						0,	//ev_struct. variable sized.
 						0	//ev_union. variable sized.
 						};
