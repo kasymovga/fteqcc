@@ -872,6 +872,15 @@ extern PATHSTRING		*precache_files;
 extern int			*precache_files_block;
 extern int			numfiles;
 
+typedef struct qcc_includechunk_s {
+	struct qcc_includechunk_s *prev;
+	char *filename;
+	char *currentdatapoint;
+	int currentlinenumber;
+	CompilerConstant_t *cnst;
+} qcc_includechunk_t;
+extern qcc_includechunk_t *currentchunk;
+
 int	QCC_CopyString (char *str);
 
 

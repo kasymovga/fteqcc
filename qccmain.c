@@ -27,8 +27,6 @@ void QCC_PR_LexWhitespace (void);
 void *FS_ReadToMem(char *fname, void *membuf, int *len);
 void FS_CloseFromMem(void *mem);
 
-struct qcc_includechunk_s *currentchunk;
-
 unsigned int MAX_REGS;
 
 int	MAX_STRINGS;
