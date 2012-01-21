@@ -783,7 +783,7 @@ pbool QCC_WriteData (int crc)
 			dd->s_name = QCC_CopyString (def->name);
 			dd->ofs = G_INT(def->ofs);
 		}
-		else if ((def->scope||def->constant) && (def->type->type != ev_string || opt_constant_names_strings))
+		else if ((def->scope||def->constant) && (def->type->type != ev_string || (strncmp(def->name, "dotranslate_", 12) && opt_constant_names_strings)))
 		{
 			if (opt_constant_names)
 			{
