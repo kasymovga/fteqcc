@@ -320,10 +320,14 @@ int	QCC_CopyString (char *str)
 
 	if (opt_noduplicatestrings)
 	{
-		if (!str || !*str)
+		// NULL string is at 0
+		if (!str)
 			return 0;
 
-		for (s = strings; s < strings+strofs; s++)
+		// all others are >= 1
+		// this hack is necessary so if("") stays true, if(string_null)
+		// stays false with this optimization
+		for (s = strings + 1; s < strings+strofs; s++)
 			if (!strcmp(s, str))
 			{
 				optres_noduplicatestrings += strlen(str);
